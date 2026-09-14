@@ -101,7 +101,7 @@ def codex_usage():
     rpc = None
     try:
         rpc = CodexRPC()
-        rpc.call('initialize', {'clientInfo': {'name': 'usage_panel', 'title': 'Usage Panel', 'version': '1.0.0'}})
+        rpc.call('initialize', {'clientInfo': {'name': 'usage_panel', 'title': 'Usage Panel', 'version': '1.1.0'}})
         rpc.send({'method': 'initialized'})
         result = rpc.call('account/rateLimits/read')
         buckets = result.get('rateLimitsByLimitId') or {'codex': result.get('rateLimits')}
@@ -115,12 +115,25 @@ def codex_usage():
                 'plan': bucket.get('planType') or '', 'windows': windows})
         if not cards:
             raise RuntimeError('账户未返回额度数据。')
-        return {'ok': True, 'cards': cards, 'updated': time.time(), 'note': '官方账户额度 · 剩余百分比'}
+        return {'ok': True, 'cards': cards, 'reset_credits': normalize_credits(result.get('rateLimitResetCredits')),
+                'updated': time.time(), 'note': '官方账户额度 · 剩余百分比'}
     except Exception as exc:
         return {'ok': False, 'cards': [], 'note': str(exc) if isinstance(exc, RuntimeError) else '读取超时或连接失败，请稍后刷新。'}
     finally:
         if rpc:
             rpc.close()
+
+def normalize_credits(raw):
+    if not isinstance(raw, dict):
+        return {'count': None, 'expires': []}
+    count = raw.get('availableCount')
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = None
+    expires = sorted(c['expiresAt'] for c in (raw.get('credits') or [])
+        if isinstance(c, dict) and c.get('status') == 'available'
+        and isinstance(c.get('expiresAt'), (int, float)) and not isinstance(c['expiresAt'], bool))
+    return {'count': count, 'expires': expires}
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):

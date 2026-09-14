@@ -2,14 +2,14 @@
 
 ![Usage Panel — Your AI, at a glance](docs/assets/hero.svg)
 
-### 额度 · 余额 · 模型评分，一个托盘面板看清。
+### 额度 · 重置卡 · 今日 Token · 模型评分。
 
 让 **Codex、DeepSeek API 和 Codex Radar** 待在桌面一角，随时查看。
 
 [![Tests](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml/badge.svg)](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-173d2b?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-173d2b?style=flat-square&logo=python&logoColor=b8f3a5)
-![Version](https://img.shields.io/badge/version-1.0.0-8ce7a2?style=flat-square&labelColor=173d2b)
+![Version](https://img.shields.io/badge/version-1.1.0-8ce7a2?style=flat-square&labelColor=173d2b)
 
 [快速开始](#quick-start) · [功能一览](#features) · [构建程序](#build) · [使用说明](使用说明.md)
 
@@ -26,11 +26,13 @@
 | **01 / CODEX** | **02 / DEEPSEEK** | **03 / MODEL RADAR** |
 | :--- | :--- | :--- |
 | **还剩多少额度？** | **API 账户还有多少余额？** | **各档位表现如何？** |
-| 官方账户额度、剩余进度条与重置倒计时。 | 读取 Claude Code 中的 DeepSeek API 配置，显示官方余额。 | Astra、Sol、Terra、Luna，按推理档位对照社区评测。 |
+| 官方账户额度、重置卡数量及到期时间、本机今日 token。 | 读取 Claude Code 中的 DeepSeek API 配置，显示官方余额和本机今日 token。 | Astra、Sol、Terra、Luna，按推理档位对照社区评测。 |
 
 ### 日常使用，保持轻巧
 
-- **每 5 分钟自动刷新**，也可以随时手动查询。
+- **账户与评分每 5 分钟刷新**；今日 token **每 10 秒**读取本机新记录，隐藏后也持续更新。
+- **今日用量明细**，分别显示 Codex 与 Claude Code 中 DeepSeek 的输入、输出和缓存命中。
+- **重置卡一眼可见**，显示官方可用数量、最近到期日，点击「明细」查看已返回的到期时间。
 - **关闭即隐藏到托盘**，支持面板置顶。
 - **旧数据明确标记**，查询失败不会伪装成新结果。
 - **只读查询**，不发起模型对话，不消耗重置卡，不切换你的服务配置。
@@ -98,6 +100,17 @@ py -3.12 -m venv .venv
 > [!IMPORTANT]
 > IQ 来自 [Codex Radar](https://codexradar.com/) 的**社区基准评分**，并非人的智商，也不是模型厂商的官方评级。缺失档位显示 `—`；任一维度缺失时，不生成综合分。两组来源可能不同步，面板分别标出更新时间。
 
+## ⏱️ 今日 token 怎么算？
+
+按电脑本地日期统计，本机调用写入日志后更新，**不是逐 token 流式计数，也不是全账户账单**。
+
+- Codex：读取 `CODEX_HOME` 下 `sessions/` 与 `archived_sessions/` 的 token 事件，按累计值差额统计并去重。
+- DeepSeek：读取 Claude Code 项目日志中 DeepSeek 模型的用量，按消息 ID 去重；其他 API 客户端的调用不在此范围。
+- token 统一以 m（百万）显示，保留三位小数；不足 0.001m 的非零值显示 <0.001m。输入包含缓存读取和创建；缓存命中是输入的子集，不能再加一次。推理 token 已包含在输出中。
+- 启动时补读当天保留的日志，之后增量读取；跨午夜重新按本地日期统计。日志缺失或已清理可能导致统计不完整。
+- 未找到日志目录显示 `—`；存在目录但当天没有可统计调用显示 `0`。
+- 不读取对话正文用于展示，不上传本地用量，不将 token 换算成未经核实的费用。
+
 ## 🔐 数据留在哪里？
 
 **登录交给原有工具，面板只读取所需信息。**
@@ -113,6 +126,7 @@ py -3.12 -m venv .venv
 | 环境变量 | 用途 |
 | :--- | :--- |
 | `USAGE_PANEL_CODEX_EXE` | 指定非标准位置的 Codex 可执行文件。 |
+| `CODEX_HOME` | 指定 Codex 本地会话记录目录，默认 `~/.codex`。 |
 | `CLAUDE_CONFIG_DIR` | 指定 Claude Code 配置目录。 |
 | `DEEPSEEK_API_KEY` | 优先使用此变量中的 DeepSeek 密钥。请勿提交真实密钥。 |
 
@@ -122,16 +136,18 @@ py -3.12 -m venv .venv
 <summary><strong>展开测试与项目结构</strong></summary>
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s source -p test_providers.py
+.\.venv\Scripts\python.exe -m unittest discover -s source -p "test*.py"
 ```
 
-测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法及密钥发送目标。
+测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法、密钥发送目标，以及增量 token 统计、缓存口径、去重与跨日行为。
 
 ```text
 usage-panel/
 ├── source/
 │   ├── app.py               # 托盘与面板
 │   ├── providers.py         # 额度、余额、评分适配器
+│   ├── token_usage.py      # 本机今日 token 增量统计
+│   ├── test_tokens.py      # token 统计测试
 │   └── test_providers.py    # 无凭据单元测试
 ├── docs/assets/             # README 视觉资源
 ├── .github/workflows/       # 自动测试
@@ -145,7 +161,8 @@ usage-panel/
 
 | 来源 | 读取内容 |
 | :--- | :--- |
-| [Codex App Server](https://learn.chatgpt.com/docs/app-server) | `account/rateLimits/read` 官方账户额度 |
+| [Codex App Server](https://learn.chatgpt.com/docs/app-server) | `account/rateLimits/read` 官方账户额度与重置卡 |
+| 本机 Codex / Claude Code 日志 | 当天保留的调用用量，不等同于全账户统计 |
 | [DeepSeek API](https://api-docs.deepseek.com/zh-cn/api/get-user-balance/) | 账户余额，非当天消费统计 |
 | [Codex Radar](https://codexradar.com/) | 公开模型评测数据，网站改版时可能需要更新适配器 |
 

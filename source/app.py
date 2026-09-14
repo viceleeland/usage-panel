@@ -14,6 +14,7 @@ import psutil
 import pystray
 from PIL import Image, ImageDraw, ImageGrab, ImageTk
 from providers import collect, read_json
+from token_usage import DailyTokens
 
 BASE = pathlib.Path(sys.executable).parent if getattr(sys, 'frozen', False) else pathlib.Path(__file__).resolve().parent.parent
 DATA = BASE/'data'
@@ -26,6 +27,9 @@ FONT = 'Microsoft YaHei UI'
 MONO = 'Consolas'
 LEVELS = ['ultra', 'max', 'xhigh', 'high', 'medium', 'low']
 DEFAULT_SCORES = {name: ['']*6 for name in ['Astra','Sol','Terra','Luna']}
+
+def token_text(value):
+    return '<0.001m' if 0 < value < 1000 else f'{value/1_000_000:.3f}m'
 
 def reset_text(timestamp):
     if not isinstance(timestamp, (int, float)):
@@ -63,6 +67,10 @@ class UsagePanel:
         self.messages = queue.Queue()
         self.busy = False
         self.closed = False
+        self.token_reader = DailyTokens()
+        self.token_busy = False
+        self.tokens = {}
+        self.token_labels = {}
         self.result = read_json(DATA/'usage-cache.json')
         for data in self.result.values():
             if isinstance(data,dict):
@@ -86,6 +94,7 @@ class UsagePanel:
         self.root.geometry(f'+{max(0, self.root.winfo_screenwidth()-width-32)}+{max(0,self.root.winfo_screenheight()-height-90)}')
         self.root.after(100, self.poll)
         self.root.after(100, self.refresh)
+        self.root.after(150, self.refresh_tokens)
         self.root.after(300000, self.auto_refresh)
         self.root.after(30000, self.tick)
         if args.smoke:
@@ -98,13 +107,14 @@ class UsagePanel:
             font=(MONO if mono else FONT, size, 'bold' if bold else 'normal'), **kwargs)
 
     def line(self):
-        tk.Frame(self.body, bg=LINE, height=1).pack(fill='x', pady=7)
+        tk.Frame(self.body, bg=LINE, height=1).pack(fill='x', pady=5)
 
     def button(self, parent, text, command):
         return tk.Button(parent, text=text, command=command, bg=BG, fg=FG, activebackground='#DDE8D9',
             relief='flat', bd=0, cursor='hand2', padx=7, pady=4, font=(FONT,9))
 
     def draw(self):
+        self.token_labels = {}
         for child in self.body.winfo_children():
             child.destroy()
         header = tk.Frame(self.body, bg=BG)
@@ -147,6 +157,16 @@ class UsagePanel:
                     wraplength=480, justify='left').pack(anchor='w', pady=(4,5))
                 if not data.get('ok') and data.get('updated'):
                     self.label(self.body, f'上次成功 {dt.datetime.fromtimestamp(data["updated"]):%m/%d %H:%M} · 当前为旧数据', 8, '#B08129').pack(anchor='w')
+            credits = data.get('reset_credits') or {}
+            count = credits.get('count')
+            expiry = credits.get('expires') or []
+            text = f'重置卡  {count} 张可用' if count is not None else '重置卡  — 未提供'
+            if expiry:
+                text += f'  ·  最近到期 {dt.datetime.fromtimestamp(expiry[0]):%m/%d %H:%M}'
+            if not data.get('ok'):
+                text += '（旧数据）' if count is not None else ''
+            self.label(self.body, text, 9, MUTED).pack(anchor='w', pady=(0, 3))
+            self.token_row('codex')
             self.line()
         deep=self.result.get('deepseek',{})
         head=tk.Frame(self.body,bg=BG)
@@ -164,6 +184,7 @@ class UsagePanel:
         self.label(self.body,deep.get('note','读取本机 DeepSeek API 配置…'),8,MUTED,wraplength=480,justify='left').pack(anchor='w',pady=(3,0))
         if not deep.get('ok') and deep.get('updated'):
             self.label(self.body,f'旧数据 · {dt.datetime.fromtimestamp(deep["updated"]):%m/%d %H:%M}',8,'#B08129').pack(anchor='w')
+        self.token_row('deepseek')
         self.line()
         self.label(self.body, 'SUMMARY', 10, bold=True, mono=True).pack(anchor='w')
         summary = tk.Frame(self.body,bg=BG)
@@ -220,7 +241,7 @@ class UsagePanel:
         timestamps=[v.get('updated',0) for v in self.result.values() if isinstance(v,dict)]
         last=max(timestamps,default=0)
         stamp=dt.datetime.fromtimestamp(last).strftime('%H:%M:%S') if last else '等待首次读取'
-        self.label(self.body,f'更新于 {stamp}  ·  每 5 分钟刷新  ·  重置时间为本地时间',8,MUTED).pack(anchor='w',pady=(5,0))
+        self.label(self.body,f'账户更新 {stamp} · 每 5 分钟 · token 每 10 秒',8,MUTED).pack(anchor='w',pady=(5,0))
         self.tray.title=('AI 用量 · '+' | '.join(tooltip))[:127] if tooltip else 'AI 用量 · 尚未接入'
         self.root.update_idletasks()
         if self.root.winfo_y()+self.root.winfo_reqheight()>self.root.winfo_screenheight()-55:
@@ -261,6 +282,11 @@ class UsagePanel:
                 elif kind=='error':
                     self.busy=False
                     self.draw()
+                elif kind=='tokens':
+                    self.tokens=value
+                    self.token_busy=False
+                    self.update_token_labels()
+                    self.root.after(10000, self.refresh_tokens)
                 elif kind=='show': self.show()
                 elif kind=='refresh': self.refresh()
                 elif kind=='quit': self.quit(); return
@@ -277,6 +303,81 @@ class UsagePanel:
             target.replace(DATA/'usage-cache.json')
         except OSError:
             pass
+
+    def token_row(self, kind):
+        row = tk.Frame(self.body, bg=BG)
+        row.pack(fill='x')
+        self.token_labels[kind] = self.label(row, '', 10, mono=True)
+        self.token_labels[kind].pack(side='left')
+        self.button(row, '明细', self.usage_details).pack(side='right')
+        self.update_token_labels()
+
+    def update_token_labels(self):
+        fresh = self.tokens.get('date') == dt.datetime.now().date().isoformat()
+        for kind, label in self.token_labels.items():
+            data = self.tokens.get(kind, {})
+            if not fresh or not data:
+                text = '今日 — · 正在读取本机记录'
+            elif not data.get('available'):
+                text = '今日 — · 未找到本机记录'
+            elif data.get('partial'):
+                text = f'今日 {token_text(data["total"])} · 不完整统计'
+            else:
+                text = f'今日 {token_text(data["total"])} token · 本机'
+            label.configure(text=text)
+
+    def refresh_tokens(self):
+        if self.closed or self.token_busy:
+            return
+        self.token_busy = True
+        def worker():
+            try:
+                result = self.token_reader.read()
+            except Exception:
+                result = {'date': dt.datetime.now().date().isoformat(),
+                          'codex': {'available': False}, 'deepseek': {'available': False}}
+            self.messages.put(('tokens', result))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def usage_details(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title('今日用量与重置卡')
+        dialog.configure(bg=BG, padx=20, pady=16)
+        content = tk.StringVar()
+        self.label(dialog, '', 10, justify='left', textvariable=content).pack(anchor='w')
+        def update():
+            if not dialog.winfo_exists():
+                return
+            lines = [f'本机今日 · {dt.datetime.now():%Y-%m-%d} · 本地时区', '']
+            for key, title in [('codex', 'Codex'), ('deepseek', 'DeepSeek / Claude Code')]:
+                data = self.tokens.get(key, {})
+                lines.append(title)
+                if data.get('available') and self.tokens.get('date') == dt.datetime.now().date().isoformat():
+                    lines += [f'输入 {token_text(data["input"])}  ·  输出 {token_text(data["output"])}',
+                              f'其中缓存命中 {token_text(data["cached"])}  ·  合计 {token_text(data["total"])}',
+                              '部分记录读取失败，当前为不完整统计。' if data.get('partial') else '']
+                else:
+                    lines += ['尚无可用统计。', '']
+            account = self.result.get('codex', {})
+            credits = account.get('reset_credits') or {}
+            count = credits.get('count')
+            lines += [f'重置卡 · {count} 张可用' if count is not None else '重置卡 · 未提供']
+            if not account.get('ok'):
+                lines += ['账户数据尚未更新，以下可能为旧数据。']
+            lines += [f'到期 {dt.datetime.fromtimestamp(stamp):%Y-%m-%d %H:%M}' for stamp in credits.get('expires', [])]
+            lines += ['', 'm = 百万 token；可用卡数以官方返回为准。',
+                      '卡片到期明细可能不完整。',
+                      '每 10 秒读取本机日志，调用写入后才会增加。',
+                      '输入含缓存；缓存命中已包含在输入中，不重复相加。',
+                      '仅统计保留在本机的记录，不包含其他设备或其他 API 客户端。',
+                      'token 数量不等同于账单费用；重置卡仅展示，不自动使用。']
+            if self.tokens.get('updated'):
+                lines += [f'本机记录读取于 {dt.datetime.fromtimestamp(self.tokens["updated"]):%H:%M:%S}']
+            content.set('\n'.join(lines))
+            dialog.after(1000, update)
+        update()
+        self.button(dialog, '关闭', dialog.destroy).pack(anchor='e', pady=(8,0))
+        return dialog
 
     def save_settings(self):
         DATA.mkdir(exist_ok=True)
@@ -300,7 +401,9 @@ class UsagePanel:
         dialog.configure(bg=BG,padx=20,pady=18)
         text=('Codex\n自动使用本机 Codex CLI 的登录读取官方额度。\n\n'
               'DeepSeek API / Claude Code\n使用 Claude Code 已配置的 DeepSeek API 密钥读取余额。\n'
-              '只访问 DeepSeek 官方余额接口，不发起模型对话。\n\n'
+              '只访问 DeepSeek 官方余额接口，不发起模型对话。\n'
+              '今日 token 每 10 秒读取本机日志，含缓存，不代表账单。\n'
+              '只统计本机保留的记录，调用写入后才会增加。\n\n'
               '数据说明\n进度条显示剩余比例；未返回的窗口不显示。\n'
               '读取失败时保留旧值并标注，过期值不当作新额度。\n'
               'IQ 来自 Codex Radar，支持综合、软件工程、视觉空间。\n综合分按两项的有效题量加权，并非人的智商。\n\n'
@@ -334,6 +437,10 @@ class UsagePanel:
             box=(self.root.winfo_rootx(),self.root.winfo_rooty(),self.root.winfo_rootx()+self.root.winfo_width(),self.root.winfo_rooty()+self.root.winfo_height())
             ImageGrab.grab(bbox=box).save(self.args.screenshot)
         if self.args.report:
+            details = self.usage_details()
+            details.update()
+            details_ok = details.winfo_exists() and details.winfo_height() > 100
+            details.destroy()
             self.hide()
             hidden_ok=self.root.state()=='withdrawn'
             self.show()
@@ -347,6 +454,8 @@ class UsagePanel:
             pathlib.Path(self.args.report).write_text(json.dumps({'completed':success,'codex_ok':self.result.get('codex',{}).get('ok'),
                 'deepseek_ok':self.result.get('deepseek',{}).get('ok'),'radar_ok':self.result.get('radar',{}).get('ok'),'tray_visible':self.tray.visible,
                 'hide_show_ok':hidden_ok and shown_ok,'score_switch_ok':switched_ok,
+                'tokens_loaded': bool(self.tokens.get('updated')), 'reset_credits_loaded': self.result.get('codex', {}).get('reset_credits', {}).get('count') is not None,
+                'details_ok': bool(details_ok),
                 'width':self.root.winfo_width(),'height':self.root.winfo_height()},indent=2),encoding='utf-8')
         self.quit()
 

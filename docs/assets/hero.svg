@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="390" viewBox="0 0 1200 390" role="img" aria-labelledby="title desc">
+<title id="title">Usage Panel — Your AI, at a glance</title>
+<desc id="desc">Windows tray panel for Codex quota, DeepSeek balance and model benchmarks. Decorative illustration, not real account data.</desc>
+<defs>
+<linearGradient id="bg" x2="1" y2="1"><stop stop-color="#14252b"/><stop offset="1" stop-color="#08120f"/></linearGradient>
+<linearGradient id="green"><stop stop-color="#43dba0"/><stop offset="1" stop-color="#bafa93"/></linearGradient>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#a5ddba" stroke-opacity=".05"/></pattern>
+</defs>
+<rect width="1200" height="390" rx="22" fill="url(#bg)"/>
+<rect width="1200" height="390" rx="22" fill="url(#grid)"/>
+<g font-family="Segoe UI,Arial,sans-serif">
+<rect x="54" y="43" width="181" height="29" rx="14" fill="#193a2b" stroke="#356447"/>
+<circle cx="72" cy="58" r="4" fill="#9cf2ae"/>
+<text x="86" y="62" font-size="11" letter-spacing="2" fill="#bce7c6">WINDOWS TRAY APP</text>
+<text x="51" y="155" fill="#f0f8ef" font-size="65" font-weight="700" letter-spacing="-3">Usage Panel<tspan fill="#9ef2aa">.</tspan></text>
+<text x="56" y="203" fill="#accbb9" font-size="25">Your AI, at a glance.</text>
+<text x="56" y="246" fill="#7f9f8b" font-size="14" letter-spacing="1">QUOTA / BALANCE / MODEL INTELLIGENCE</text>
+<path d="M56 287H586" stroke="#344c3b"/>
+<text x="56" y="326" fill="#c7e6cf" font-size="14" letter-spacing="1.5">CODEX  +  DEEPSEEK  +  CODEX RADAR</text>
+<rect x="711" y="43" width="433" height="303" rx="18" fill="#102019" stroke="#3c6449"/>
+<circle cx="736" cy="65" r="4" fill="#486952"/><circle cx="751" cy="65" r="4" fill="#486952"/><circle cx="766" cy="65" r="4" fill="#486952"/>
+<text x="1117" y="69" text-anchor="end" fill="#91b69a" font-size="10" letter-spacing="1.5">5 MIN REFRESH</text>
+<path d="M712 85H1143" stroke="#2c4633"/>
+<text x="739" y="121" fill="#e0f4e5" font-size="15" font-weight="600">Codex</text>
+<text x="1117" y="121" text-anchor="end" fill="#88a891" font-size="11">QUOTA &amp; RESET</text>
+<rect x="739" y="138" width="378" height="7" rx="3" fill="#2a4231"/><rect x="739" y="138" width="270" height="7" rx="3" fill="url(#green)"/>
+<text x="739" y="188" fill="#e0f4e5" font-size="15" font-weight="600">DeepSeek API</text>
+<text x="1117" y="188" text-anchor="end" fill="#88a891" font-size="11">ACCOUNT BALANCE</text>
+<text x="739" y="219" fill="#abefab" font-family="Consolas,monospace" font-size="23">¥ · · ·</text>
+<path d="M739 238H1117" stroke="#2c4633"/>
+<text x="739" y="268" fill="#e0f4e5" font-size="15" font-weight="600">Model Radar</text>
+<rect x="739" y="285" width="84" height="28" rx="6" fill="#244532"/><text x="781" y="303" text-anchor="middle" font-size="11" fill="#c3edc6">ASTRA</text><rect x="837" y="285" width="84" height="28" rx="6" fill="#244532"/><text x="879" y="303" text-anchor="middle" font-size="11" fill="#c3edc6">SOL</text><rect x="935" y="285" width="84" height="28" rx="6" fill="#244532"/><text x="977" y="303" text-anchor="middle" font-size="11" fill="#c3edc6">TERRA</text><rect x="1033" y="285" width="84" height="28" rx="6" fill="#244532"/><text x="1075" y="303" text-anchor="middle" font-size="11" fill="#c3edc6">LUNA</text></g></svg>

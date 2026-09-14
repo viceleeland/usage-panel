@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageGrab, ImageTk
 from providers import collect, read_json
 from token_usage import DailyTokens
 from alerts import check_alerts
+from usage_view import codex_daily_rows, retain_daily_usage
 
 BASE = pathlib.Path(sys.executable).parent if getattr(sys, 'frozen', False) else pathlib.Path(__file__).resolve().parent.parent
 DATA = BASE/'data'
@@ -85,6 +86,8 @@ class UsagePanel:
             if isinstance(data,dict):
                 data['ok']=False
                 data['note']='上次缓存 · 正在刷新…'
+                if isinstance(data.get('daily_usage'), dict):
+                    data['daily_usage']['ok'] = False
         self.settings = read_json(DATA/'settings.json')
         self.scores = self.settings.get('scores', DEFAULT_SCORES.copy())
         self.radar_mode = tk.StringVar(value=self.settings.get('radar_mode','综合智能'))
@@ -166,7 +169,14 @@ class UsagePanel:
                         tooltip.append(f'{card["name"]} {window["label"]} {value}')
                 else:
                     self.label(self.body, '—  暂无额度数据', 10, MUTED).pack(anchor='w')
-                self.label(self.body, data.get('note', '正在读取本机登录状态…'), 8, MUTED,
+                daily = data.get('daily_usage') or {}
+                latest = max(daily.get('buckets') or [], key=lambda b: b['date'], default=None)
+                note = data.get('note', '正在读取本机登录状态…')
+                if latest and data.get('ok'):
+                    note = f'官方日用量 {latest["date"][5:]}  {token_text(latest["total"])}'
+                    if not daily.get('ok'):
+                        note += ' · 旧数据'
+                self.label(self.body, note, 8, MUTED,
                     wraplength=480, justify='left').pack(anchor='w', pady=(4,5))
                 if not data.get('ok') and data.get('updated'):
                     self.label(self.body, f'上次成功 {dt.datetime.fromtimestamp(data["updated"]):%m/%d %H:%M} · 当前为旧数据', 8, '#B08129').pack(anchor='w')
@@ -283,6 +293,9 @@ class UsagePanel:
                 if kind=='result':
                     for key,new in value.items():
                         old=self.result.get(key,{})
+                        if key == 'codex':
+                            new['daily_usage'] = retain_daily_usage(old.get('daily_usage'),
+                                new.get('daily_usage'), provider_ok=new.get('ok', False))
                         field={'codex':'cards','deepseek':'balances','radar':'tables'}.get(key)
                         if not new.get('ok') and field and old.get(field):
                             new={**old,**new,field:old[field]}
@@ -334,15 +347,25 @@ class UsagePanel:
         fresh = self.tokens.get('date') == dt.datetime.now().date().isoformat()
         for kind, label in self.token_labels.items():
             data = self.tokens.get(kind, {})
-            if not fresh or not data:
+            official_today = self.codex_rows()[-1] if kind == 'codex' else None
+            if official_today and official_today['source'] == 'official':
+                stale = '（旧）' if not official_today['ok'] else ''
+                rate = cache_hit_text(data) if fresh else '—'
+                text = f'官方今日 {token_text(official_today["total"])}{stale} · 本机缓存命中 {rate}'
+            elif not fresh or not data:
                 text = '今日 — · 正在读取本机记录'
             elif not data.get('available'):
                 text = '今日 — · 未找到本机记录'
             elif data.get('partial'):
                 text = f'今日 {token_text(data["total"])} · 缓存命中 — · 不完整'
             else:
-                text = f'本机今日 {token_text(data["total"])} · 缓存命中 {cache_hit_text(data)}'
+                prefix = '今日暂估' if kind == 'codex' else '本机今日'
+                text = f'{prefix} {token_text(data["total"])} · 本机缓存命中 {cache_hit_text(data)}'
             label.configure(text=text)
+
+    def codex_rows(self):
+        return codex_daily_rows(self.result.get('codex', {}).get('daily_usage'), self.tokens,
+                                dt.datetime.now().date().isoformat())
 
     def refresh_tokens(self):
         if self.closed or self.token_busy:
@@ -366,7 +389,17 @@ class UsagePanel:
         def update():
             if not dialog.winfo_exists():
                 return
-            lines = [f'本机今日 · {dt.datetime.now():%Y-%m-%d} · 本地时区', '']
+            account = self.result.get('codex', {})
+            daily = account.get('daily_usage') or {}
+            latest = max(daily.get('buckets') or [], key=lambda b: b['date'], default=None)
+            lines = ['Codex · 官方账户统计']
+            if latest:
+                lines += [f'最近已报 {latest["date"]} · {token_text(latest["total"])}'+('（旧数据）' if not daily.get('ok') else '')]
+            else:
+                lines += ['官方日统计暂未提供。']
+            if self.codex_rows()[-1]['source'] != 'official':
+                lines += ['今天官方尚未返回；面板暂用本机记录估算。']
+            lines += ['', f'本机今日明细 · {dt.datetime.now():%Y-%m-%d} · 本地时区']
             for key, title in [('codex', 'Codex'), ('deepseek', 'DeepSeek / Claude Code')]:
                 data = self.tokens.get(key, {})
                 lines.append(title)
@@ -376,20 +409,17 @@ class UsagePanel:
                               '部分记录读取失败，当前为不完整统计。' if data.get('partial') else '']
                 else:
                     lines += ['尚无可用统计。', '']
-            account = self.result.get('codex', {})
             credits = account.get('reset_credits') or {}
             count = credits.get('count')
             lines += [f'重置卡 · {count} 张可用' if count is not None else '重置卡 · 未提供']
             if not account.get('ok'):
                 lines += ['账户数据尚未更新，以下可能为旧数据。']
             lines += [f'到期 {dt.datetime.fromtimestamp(stamp):%Y-%m-%d %H:%M}' for stamp in credits.get('expires', [])]
-            lines += ['', 'm = 百万 token；可用卡数以官方返回为准。',
-                      '卡片到期明细可能不完整。',
-                      '每 10 秒读取本机日志，调用写入后才会增加。',
-                      '输入含缓存；缓存命中已包含在输入中，不重复相加。',
-                      '缓存命中率 = 缓存命中 ÷ 全部输入；无输入或记录不完整显示 —。',
-                      '仅统计保留在本机的记录，不包含其他设备或其他 API 客户端。',
-                      'token 数量不等同于账单费用；重置卡仅展示，不自动使用。']
+            lines += ['', 'm = 百万 token；卡片仅展示，到期明细可能不完整。',
+                      '官方日统计每 5 分钟读取，日期与数值沿用官方，可能有延迟。',
+                      '本机明细每 10 秒更新，仅含本机保留日志，不等同于官方总量。',
+                      '本机缓存命中率 = 缓存命中 ÷ 输入（输入已含缓存）。',
+                      '无输入或记录不完整显示 —；token 数量不等同于账单费用。']
             if self.tokens.get('updated'):
                 lines += [f'本机记录读取于 {dt.datetime.fromtimestamp(self.tokens["updated"]):%H:%M:%S}']
             content.set('\n'.join(lines))
@@ -403,11 +433,11 @@ class UsagePanel:
             self.trend_window.lift()
             return self.trend_window
         dialog = self.trend_window = tk.Toplevel(self.root)
-        dialog.title('近 7 天 · 本机 Token 趋势')
+        dialog.title('近 7 天 · Token 趋势')
         dialog.configure(bg=BG, padx=20, pady=16)
         dialog.resizable(False, False)
         self.label(dialog, '近 7 天用量', 14, bold=True).pack(anchor='w')
-        self.label(dialog, '本地日期 · 含今天 · m = 百万 token · 两张图分别缩放', 9, MUTED).pack(anchor='w', pady=(4,12))
+        self.label(dialog, '含今天 · m = 百万 token · 两张图分别缩放', 9, MUTED).pack(anchor='w', pady=(4,12))
         charts = {}
         for key, title in [('codex', 'Codex'), ('deepseek', 'DeepSeek / Claude Code')]:
             title_var = tk.StringVar(value=title)
@@ -417,7 +447,7 @@ class UsagePanel:
             charts[key] = (title, title_var, canvas)
         status = tk.StringVar()
         self.label(dialog, '', 8, MUTED, textvariable=status, justify='left').pack(anchor='w')
-        self.label(dialog, '仅统计本机保留日志，已删除或其他设备的调用不在内。\n— 为未读取；* 为记录不完整；缓存已计入输入，不重复相加。',
+        self.label(dialog, 'Codex 沿用官方日期和总量；≈ / 橙色为今日本机暂估，不计入官方合计。\nDeepSeek 仍按本机本地日期统计；— 为未提供，* 为不完整，旧为缓存。',
                    8, MUTED, justify='left').pack(anchor='w', pady=(6,0))
         self.button(dialog, '关闭', dialog.destroy).pack(anchor='e', pady=(6,0))
 
@@ -429,35 +459,52 @@ class UsagePanel:
                 history = []
             for key, (title, title_var, canvas) in charts.items():
                 canvas.delete('all')
-                if not history:
+                if not history and key != 'codex':
                     title_var.set(title)
                     canvas.create_text(252, 70, text='正在读取本机 7 天记录…', fill=MUTED, font=(FONT,10))
                     continue
-                rows = [(day['date'], day.get(key, {})) for day in history]
+                if key == 'codex':
+                    rows = [(v['date'], dict(v, available=v['total'] is not None)) for v in self.codex_rows()]
+                else:
+                    rows = [(day['date'], day.get(key, {})) for day in history]
                 known = [value for _, value in rows if value.get('available')]
                 complete = all(v.get('ok') for _, v in rows)
                 suffix = '' if complete else '（不完整）'
-                title_var.set(f'{title} · 7 天 {token_text(sum(v.get("total", 0) for v in known))}{suffix}' if known else title+' · 未找到本机记录')
+                if key == 'codex':
+                    reported = [v for v in known if v['source'] == 'official']
+                    stale = '（旧数据）' if any(not v['ok'] for v in reported) else ''
+                    title_var.set(f'Codex · 官方已报 {token_text(sum(v["total"] for v in reported))}{stale}' if reported else 'Codex · 官方日统计暂未提供')
+                else:
+                    title_var.set(f'{title} · 本机 7 天 {token_text(sum(v.get("total", 0) for v in known))}{suffix}' if known else title+' · 未找到本机记录')
                 maximum = max([v.get('total', 0) for v in known]+[1])
                 baseline, plot_height, left, step = 128, 94, 58, 62
                 canvas.create_line(26, baseline, 494, baseline, fill=LINE)
                 color = GREEN if key == 'codex' else '#2C9B87'
                 for i, (date, value) in enumerate(rows):
                     x = left + i*step
-                    amount = value.get('total', 0)
+                    amount = value.get('total') or 0
                     available = value.get('available')
+                    estimated = value.get('source') == 'local'
+                    stale = value.get('source') == 'official' and not value.get('ok')
                     height = max(2, amount/maximum*plot_height) if amount > 0 else 0
                     if available and height:
                         canvas.create_rectangle(x-17, baseline-height, x+17, baseline,
-                            fill=MUTED if value.get('partial') else color, outline='')
+                            fill=MUTED if value.get('partial') or stale else '#C89427' if estimated else color, outline='')
                     text = token_text(amount) if available else '—'
+                    if estimated:
+                        text = '≈' + text
+                    if stale:
+                        text += '旧'
                     if value.get('partial'):
                         text += '*'
                     canvas.create_text(x, baseline-height-11, text=text, fill=FG if available else MUTED,
                                        font=(MONO,8))
                     canvas.create_text(x, baseline+18, text=date[5:].replace('-', '/'), fill=MUTED, font=(MONO,9))
             stamp = self.tokens.get('updated')
-            status.set(f'读取于 {dt.datetime.fromtimestamp(stamp):%H:%M:%S} · 每 10 秒更新' if stamp else '等待读取')
+            official_stamp = (self.result.get('codex', {}).get('daily_usage') or {}).get('updated')
+            official_time = dt.datetime.fromtimestamp(official_stamp).strftime('%H:%M:%S') if official_stamp else '未提供'
+            local_time = dt.datetime.fromtimestamp(stamp).strftime('%H:%M:%S') if stamp else '未读取'
+            status.set(f'官方 {official_time} · 每 5 分钟  /  本机 {local_time} · 每 10 秒')
             self.root.after(10000, redraw)
         redraw()
         return dialog
@@ -518,8 +565,8 @@ class UsagePanel:
         text=('Codex\n自动使用本机 Codex CLI 的登录读取官方额度。\n\n'
               'DeepSeek API / Claude Code\n使用 Claude Code 已配置的 DeepSeek API 密钥读取余额。\n'
               '只访问 DeepSeek 官方余额接口，不发起模型对话。\n'
-              '今日 token 每 10 秒读取本机日志，含缓存，不代表账单。\n'
-              '只统计本机保留的记录，调用写入后才会增加。\n\n'
+              'Codex 日统计优先官方；今天尚未提供时显示本机暂估。\n'
+              '官方每 5 分钟读取，本机 token 与缓存命中率每 10 秒更新。\n\n'
               '数据说明\n进度条显示剩余比例；未返回的窗口不显示。\n'
               '读取失败时保留旧值并标注，过期值不当作新额度。\n'
               'IQ 来自 Codex Radar，支持综合、软件工程、视觉空间。\n综合分按两项的有效题量加权，并非人的智商。\n\n'
@@ -587,6 +634,9 @@ class UsagePanel:
                 'tokens_loaded': bool(self.tokens.get('updated')), 'reset_credits_loaded': self.result.get('codex', {}).get('reset_credits', {}).get('count') is not None,
                 'details_ok': bool(details_ok),
                 'history_days': len(self.tokens.get('history', [])),
+                'official_daily_ok': (self.result.get('codex', {}).get('daily_usage') or {}).get('ok'),
+                'official_history_days': sum(v['source'] == 'official' for v in self.codex_rows()),
+                'local_estimate_days': sum(v['source'] == 'local' for v in self.codex_rows()),
                 'cache_rate_visible': all('缓存命中' in label.cget('text') for label in self.token_labels.values()),
                 'width':self.root.winfo_width(),'height':self.root.winfo_height()},indent=2),encoding='utf-8')
         self.quit()

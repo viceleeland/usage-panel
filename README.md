@@ -9,7 +9,7 @@
 [![Tests](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml/badge.svg)](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-173d2b?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-173d2b?style=flat-square&logo=python&logoColor=b8f3a5)
-![Version](https://img.shields.io/badge/version-1.2.0-8ce7a2?style=flat-square&labelColor=173d2b)
+![Version](https://img.shields.io/badge/version-1.3.0-8ce7a2?style=flat-square&labelColor=173d2b)
 
 [快速开始](#quick-start) · [功能一览](#features) · [构建程序](#build) · [使用说明](使用说明.md)
 
@@ -26,12 +26,13 @@
 | **01 / CODEX** | **02 / DEEPSEEK** | **03 / MODEL RADAR** |
 | :--- | :--- | :--- |
 | **还剩多少额度？** | **API 账户还有多少余额？** | **各档位表现如何？** |
-| 官方账户额度、重置卡数量及到期时间、本机今日 token。 | 读取 Claude Code 中的 DeepSeek API 配置，显示官方余额和本机今日 token。 | Astra、Sol、Terra、Luna，按推理档位对照社区评测。 |
+| 官方账户额度、重置卡数量及到期时间、官方日用量。 | 读取 Claude Code 中的 DeepSeek API 配置，显示官方余额和本机今日 token。 | Astra、Sol、Terra、Luna，按推理档位对照社区评测。 |
 
 ### 日常使用，保持轻巧
 
-- **账户与评分每 5 分钟刷新**；今日 token **每 10 秒**读取本机新记录，隐藏后也持续更新。
-- **近 7 天趋势图**，从 SUMMARY 旁的「7 天趋势」打开，Codex 与 DeepSeek 分别展示，按本地日期统计，单位为 m。
+- **账户、官方日统计与评分每 5 分钟刷新**；本机 token 和缓存明细每 10 秒增量更新，隐藏后也持续读取。
+- **近 7 天趋势图**，从 SUMMARY 旁打开：Codex 使用官方返回的日期与总量；DeepSeek 使用本机日志，单位为 m。
+- **官方优先**：Codex 今日已有官方值时直接显示；未返回时，橙色 `≈` 柱表示今日本机暂估，不计入官方合计。过去日期缺失显示 `—`。
 - **低额度通知**，默认开启：Codex 剩余 ≤10%，DeepSeek 余额 ≤¥10 / $1；在「设置 / 说明」关闭。
 - **缓存命中率**，面板与明细都显示，按缓存命中 token ÷ 全部输入 token 计算，保留一位小数；当天无输入或记录不完整时显示 `—`。
 - **今日用量明细**，分别显示 Codex 与 Claude Code 中 DeepSeek 的输入、输出和缓存命中。
@@ -103,9 +104,13 @@ py -3.12 -m venv .venv
 > [!IMPORTANT]
 > IQ 来自 [Codex Radar](https://codexradar.com/) 的**社区基准评分**，并非人的智商，也不是模型厂商的官方评级。缺失档位显示 `—`；任一维度缺失时，不生成综合分。两组来源可能不同步，面板分别标出更新时间。
 
-## ⏱️ 今日 token 怎么算？
+## ⏱️ 官方统计和本机实时数据
 
-按电脑本地日期统计，本机调用写入日志后更新，**不是逐 token 流式计数，也不是全账户账单**。
+**Codex 历史以官方日统计为准。** 通过 `account/usage/read` 读取日期和 token 总量，直接沿用 `startDate`，不按电脑时区平移。主面板显示最近已报的官方值；趋势图的官方合计只包含当前 7 天范围内实际返回的官方值。官方数据可能延迟，不等同于逐 token 实时计数。
+
+若今天尚未返回官方值，使用本机暂估并明确标注；一旦官方值出现就替换它，不把两者相加。过去日期缺失显示 `—`，合法的官方零值才显示 `0`。日统计读取失败保留上次成功数据和时间，并标为旧数据，不影响额度与重置卡读取。
+
+**本机明细**（输入、输出、缓存命中率）仍按电脑本地日期统计。DeepSeek 当前也仅有本机 token 记录，因此这些数字不应直接与官方账户总量等同：
 
 - Codex：读取 `CODEX_HOME` 下 `sessions/` 与 `archived_sessions/` 的 token 事件，按累计值差额统计并去重。
 - DeepSeek：读取 Claude Code 项目日志中 DeepSeek 模型的用量，按消息 ID 去重；其他 API 客户端的调用不在此范围。
@@ -148,7 +153,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s source -p "test*.py"
 ```
 
-测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法、密钥发送目标，以及增量 token 统计、7 天历史、缓存口径、去重、跨日行为和低额度提醒。
+测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法、密钥发送目标，以及增量 token 统计、7 天历史、缓存口径、去重、跨日行为、低额度提醒、官方日期保留与数据来源选择。
 
 ```text
 usage-panel/
@@ -156,6 +161,8 @@ usage-panel/
 │   ├── app.py               # 托盘与面板
 │   ├── providers.py         # 额度、余额、评分适配器
 │   ├── token_usage.py      # 本机今日及 7 天 token 统计
+│   ├── usage_view.py       # 官方优先、缓存及今日暂估规则
+│   ├── test_usage_view.py  # 来源选择与未知值测试
 │   ├── alerts.py           # 低额度提醒与去重
 │   ├── test_alerts.py      # 提醒阈值及状态测试
 │   ├── test_tokens.py      # token 统计测试
@@ -172,7 +179,7 @@ usage-panel/
 
 | 来源 | 读取内容 |
 | :--- | :--- |
-| [Codex App Server](https://learn.chatgpt.com/docs/app-server) | `account/rateLimits/read` 官方账户额度与重置卡 |
+| [Codex App Server](https://learn.chatgpt.com/docs/app-server) | `account/rateLimits/read` 额度与重置卡；`account/usage/read` 官方日统计 |
 | 本机 Codex / Claude Code 日志 | 当天保留的调用用量，不等同于全账户统计 |
 | [DeepSeek API](https://api-docs.deepseek.com/zh-cn/api/get-user-balance/) | 账户余额，非当天消费统计 |
 | [Codex Radar](https://codexradar.com/) | 公开模型评测数据，网站改版时可能需要更新适配器 |

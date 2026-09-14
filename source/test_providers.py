@@ -18,6 +18,75 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(row['used'],100)
         self.assertIsInstance(row['reset'],float)
 
+    def test_daily_usage_preserves_official_dates_and_totals(self):
+        daily = providers.normalize_daily_usage({'dailyUsageBuckets': [
+            {'startDate': '2026-09-13', 'tokens': 122116000},
+            {'startDate': '2026-09-12', 'tokens': 76572000}]})
+        self.assertTrue(daily['ok'])
+        self.assertEqual(daily['buckets'], [
+            {'date': '2026-09-12', 'total': 76572000},
+            {'date': '2026-09-13', 'total': 122116000}])
+
+    def test_daily_usage_missing_is_unknown_but_explicit_zero_is_valid(self):
+        for raw in (None, {}, {'dailyUsageBuckets': None}, {'dailyUsageBuckets': {}}):
+            with self.subTest(raw=raw):
+                daily = providers.normalize_daily_usage(raw)
+                self.assertFalse(daily['ok'])
+                self.assertEqual(daily['buckets'], [])
+        daily = providers.normalize_daily_usage({'dailyUsageBuckets': [
+            {'startDate': '2026-09-12', 'tokens': None},
+            {'startDate': '2026-09-13', 'tokens': 0},
+            {'startDate': '2026-09-14'}]})
+        self.assertEqual(daily['buckets'], [{'date': '2026-09-13', 'total': 0}])
+
+    def test_daily_usage_empty_does_not_fill_dates(self):
+        daily = providers.normalize_daily_usage({'dailyUsageBuckets': []})
+        self.assertTrue(daily['ok'])
+        self.assertEqual(daily['buckets'], [])
+
+    def test_daily_usage_rejects_invalid_dates_and_totals(self):
+        rows = [{'startDate': date, 'tokens': 1} for date in (
+            None, 20260913, '20260913', '2026-02-30', '2026-09-13T00:00:00Z', '2026-9-13')]
+        rows += [{'startDate': '2026-09-13', 'tokens': value} for value in (-1, True, 1.5, '100')]
+        rows += [None, 'invalid', {'startDate': '2026-09-13', 'tokens': 12}]
+        daily = providers.normalize_daily_usage({'dailyUsageBuckets': rows})
+        self.assertEqual(daily['buckets'], [{'date': '2026-09-13', 'total': 12}])
+
+    def test_daily_usage_duplicate_dates_are_not_added(self):
+        daily = providers.normalize_daily_usage({'dailyUsageBuckets': [
+            {'startDate': '2026-09-13', 'tokens': 12},
+            {'startDate': '2026-09-13', 'tokens': 12}]})
+        self.assertEqual(daily['buckets'], [{'date': '2026-09-13', 'total': 12}])
+
+    def test_daily_usage_failure_does_not_hide_quota_or_reset_credits(self):
+        quota = {'rateLimits': {'planType': 'pro', 'primary': {'usedPercent': 30}},
+                 'rateLimitResetCredits': {'availableCount': 3, 'credits': []}}
+        with patch.object(providers, 'CodexRPC') as rpc_class:
+            rpc = rpc_class.return_value
+            rpc.call.side_effect = [{}, quota, TimeoutError()]
+            result = providers.codex_usage()
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['cards'][0]['windows'][0]['used'], 30)
+        self.assertEqual(result['reset_credits']['count'], 3)
+        self.assertFalse(result['daily_usage']['ok'])
+        self.assertEqual(result['daily_usage']['buckets'], [])
+        rpc.close.assert_called_once()
+
+    def test_daily_usage_is_fetched_using_the_same_read_only_rpc(self):
+        quota = {'rateLimits': {'primary': {'usedPercent': 30}}}
+        with patch.object(providers, 'CodexRPC') as rpc_class:
+            rpc = rpc_class.return_value
+            rpc.call.side_effect = [{}, quota, {'dailyUsageBuckets': [
+                {'startDate': '2026-09-13', 'tokens': 42}]}]
+            result = providers.codex_usage()
+        self.assertTrue(result['daily_usage']['ok'])
+        self.assertEqual(result['daily_usage']['buckets'], [{'date': '2026-09-13', 'total': 42}])
+        self.assertIsInstance(result['daily_usage']['updated'], float)
+        self.assertEqual([call.args[0] for call in rpc.call.call_args_list],
+                         ['initialize', 'account/rateLimits/read', 'account/usage/read'])
+        rpc_class.assert_called_once_with()
+        rpc.close.assert_called_once()
+
     def test_iq_matches_site_task_weighting(self):
         a={'points':[{'model':'gpt-6-astra','effort':'high','iq':100,'total':120}]}
         b={'points':[{'model':'gpt-6-astra','effort':'high','iq':140,'valid_tasks':30}]}

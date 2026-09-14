@@ -97,11 +97,32 @@ def normalize_window(raw, label=None):
             reset = None
     return {'label': label, 'used': max(0, min(100, used)), 'reset': reset}
 
+def normalize_daily_usage(raw):
+    """Keep the service's calendar dates and totals without filling missing days."""
+    rows = raw.get('dailyUsageBuckets') if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return {'ok': False, 'buckets': [], 'note': '官方每日统计暂不可用。'}
+    buckets = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        date, tokens = row.get('startDate'), row.get('tokens')
+        if not isinstance(date, str) or not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+            continue
+        try:
+            if dt.date.fromisoformat(date).isoformat() != date:
+                continue
+        except ValueError:
+            continue
+        buckets[date] = tokens
+    return {'ok': True, 'buckets': [{'date': date, 'total': buckets[date]} for date in sorted(buckets)],
+            'note': '官方账户日统计 · 按接口日期显示' if buckets else '官方尚未返回可用每日数据。'}
+
 def codex_usage():
     rpc = None
     try:
         rpc = CodexRPC()
-        rpc.call('initialize', {'clientInfo': {'name': 'usage_panel', 'title': 'Usage Panel', 'version': '1.2.0'}})
+        rpc.call('initialize', {'clientInfo': {'name': 'usage_panel', 'title': 'Usage Panel', 'version': '1.3.0'}})
         rpc.send({'method': 'initialized'})
         result = rpc.call('account/rateLimits/read')
         buckets = result.get('rateLimitsByLimitId') or {'codex': result.get('rateLimits')}
@@ -115,8 +136,13 @@ def codex_usage():
                 'plan': bucket.get('planType') or '', 'windows': windows})
         if not cards:
             raise RuntimeError('账户未返回额度数据。')
+        try:
+            daily_usage = normalize_daily_usage(rpc.call('account/usage/read'))
+        except Exception:
+            daily_usage = {'ok': False, 'buckets': [], 'note': '官方每日统计读取失败，请稍后刷新。'}
+        daily_usage['updated'] = time.time()
         return {'ok': True, 'cards': cards, 'reset_credits': normalize_credits(result.get('rateLimitResetCredits')),
-                'updated': time.time(), 'note': '官方账户额度 · 剩余百分比'}
+                'daily_usage': daily_usage, 'updated': time.time(), 'note': '官方账户额度 · 剩余百分比'}
     except Exception as exc:
         return {'ok': False, 'cards': [], 'note': str(exc) if isinstance(exc, RuntimeError) else '读取超时或连接失败，请稍后刷新。'}
     finally:

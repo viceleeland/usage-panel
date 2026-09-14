@@ -101,7 +101,7 @@ def codex_usage():
     rpc = None
     try:
         rpc = CodexRPC()
-        rpc.call('initialize', {'clientInfo': {'name': 'usage_panel', 'title': 'Usage Panel', 'version': '1.1.0'}})
+        rpc.call('initialize', {'clientInfo': {'name': 'usage_panel', 'title': 'Usage Panel', 'version': '1.2.0'}})
         rpc.send({'method': 'initialized'})
         result = rpc.call('account/rateLimits/read')
         buckets = result.get('rateLimitsByLimitId') or {'codex': result.get('rateLimits')}

@@ -1,4 +1,4 @@
-"""Incremental, local-only token counters; never retain conversation content."""
+"""Incremental, local-only daily token counters; never retain conversation content."""
 import datetime as dt
 import hashlib
 import json
@@ -24,7 +24,7 @@ class DailyTokens:
             when = dt.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
             if when.tzinfo is None:
                 return
-            today = when.astimezone(now.tzinfo).date() == now.date()
+            day = when.astimezone(now.tzinfo).date()
         except (AttributeError, TypeError, ValueError):
             return
         if kind == 'codex':
@@ -39,7 +39,7 @@ class DailyTokens:
             values = tuple(number(total.get(k)) for k in keys)
             previous = state['previous']
             state['previous'] = values
-            if not today:
+            if not now.date()-dt.timedelta(days=6) <= day <= now.date():
                 return
             if previous is not None and values[3] >= previous[3]:
                 delta = tuple(max(0, v-p) for v, p in zip(values, previous))
@@ -49,10 +49,10 @@ class DailyTokens:
                 delta = tuple(number(last.get(k)) for k in keys)
             if delta[3]:
                 # Forked/copied logs and repeated token_count notifications count once.
-                state['events'][(stamp, values)] = delta
+                state['events'][(stamp, values)] = (day, delta)
         else:
             message = record.get('message') or {}
-            if record.get('type') != 'assistant' or not today:
+            if record.get('type') != 'assistant' or day > now.date():
                 return
             if not str(message.get('model', '')).lower().startswith('deepseek'):
                 return
@@ -64,16 +64,28 @@ class DailyTokens:
             inputs = number(usage.get('input_tokens')) + cache + number(usage.get('cache_creation_input_tokens'))
             outputs = number(usage.get('output_tokens'))
             values = (inputs, outputs, cache, inputs+outputs)
-            old = state['events'].get(identity, (0, 0, 0, 0))
-            state['events'][identity] = tuple(max(a, b) for a, b in zip(old, values))
+            # A streaming message may finish after midnight or appear in copied
+            # logs. Keep its earliest date and largest counters as one event.
+            # Older dates are retained in memory to establish that first date.
+            self._merge_event(state['events'], identity, day, values)
+
+    @staticmethod
+    def _merge_event(events, identity, day, values):
+        previous_day, previous = events.get(identity, (day, (0, 0, 0, 0)))
+        events[identity] = (min(day, previous_day),
+                            tuple(max(a, b) for a, b in zip(previous, values)))
 
     def read(self, now=None):
         now = now or dt.datetime.now().astimezone()
         if now.date() != self.day:
             self.files.clear()
             self.day = now.date()
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        result = {'date': self.day.isoformat(), 'updated': time.time()}
+        first_day = self.day-dt.timedelta(days=6)
+        start = (now-dt.timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        days = [first_day+dt.timedelta(days=i) for i in range(7)]
+        history = {day: {'date': day.isoformat()} for day in days}
+        result = {'date': self.day.isoformat(), 'updated': time.time(),
+                  'history': list(history.values())}
         for kind, roots in [('codex', [self.codex/'sessions', self.codex/'archived_sessions']),
                             ('deepseek', [self.claude/'projects'])]:
             available = any(p.is_dir() for p in roots)
@@ -87,7 +99,7 @@ class DailyTokens:
                 for path in paths:
                     try:
                         stat = path.stat()
-                        if stat.st_mtime < midnight:
+                        if stat.st_mtime < start:
                             continue
                         seen.add(path)
                         state = self.files.get(path)
@@ -119,14 +131,19 @@ class DailyTokens:
                             state['mtime'] = stat.st_mtime_ns
                         if state.get('partial'):
                             failures += 1
-                        for identity, values in state['events'].items():
-                            old = events.get(identity, (0, 0, 0, 0))
-                            events[identity] = tuple(max(a, b) for a, b in zip(old, values))
+                        for identity, (day, values) in state['events'].items():
+                            self._merge_event(events, identity, day, values)
                     except OSError:
                         failures += 1
-            totals = [sum(v[i] for v in events.values()) for i in range(4)]
-            result[kind] = dict(zip(('input', 'output', 'cached', 'total'), totals))
-            result[kind].update(ok=available and not failures, available=available, partial=bool(failures))
+            totals = {day: [0, 0, 0, 0] for day in days}
+            for day, values in events.values():
+                if day in totals:
+                    totals[day] = [a+b for a, b in zip(totals[day], values)]
+            for day in days:
+                daily = dict(zip(('input', 'output', 'cached', 'total'), totals[day]))
+                daily.update(ok=available and not failures, available=available, partial=bool(failures))
+                history[day][kind] = daily
+            result[kind] = dict(history[self.day][kind])
             for path in list(self.files):
                 if any(path.is_relative_to(root) for root in roots) and path not in seen:
                     del self.files[path]

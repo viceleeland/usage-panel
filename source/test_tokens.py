@@ -20,8 +20,9 @@ def codex(stamp, inputs, outputs, cached=0, last=None):
         'total_token_usage': total, 'last_token_usage': last or total}}}
 
 
-def claude(identity, inputs=10, outputs=5, cache=20, creation=3, model='deepseek-v4-pro'):
-    return {'timestamp': '2026-09-14T01:00:00Z', 'type': 'assistant', 'message': {
+def claude(identity, inputs=10, outputs=5, cache=20, creation=3, model='deepseek-v4-pro',
+           stamp='2026-09-14T01:00:00Z'):
+    return {'timestamp': stamp, 'type': 'assistant', 'message': {
         'id': identity, 'model': model, 'usage': {'input_tokens': inputs,
         'output_tokens': outputs, 'cache_read_input_tokens': cache,
         'cache_creation_input_tokens': creation}}}
@@ -61,11 +62,84 @@ class DailyTokenTests(unittest.TestCase):
     def test_local_midnight_uses_prior_cumulative_baseline(self):
         self.write(self.path, [codex('2026-09-13T15:59:59Z', 100, 10),
                                codex('2026-09-13T16:00:01Z', 130, 15)])
-        self.assertEqual(self.counter.read(NOW)['codex']['total'], 35)
+        result = self.counter.read(NOW)
+        self.assertEqual(result['codex']['total'], 35)
+        self.assertEqual(result['history'][-2]['codex']['total'], 110)
         tomorrow = NOW+dt.timedelta(days=1)
         self.write(self.path, [codex('2026-09-14T16:00:01Z', 150, 20)], 'a')
         os.utime(self.path, (tomorrow.timestamp(), tomorrow.timestamp()))
-        self.assertEqual(self.counter.read(tomorrow)['codex']['total'], 25)
+        result = self.counter.read(tomorrow)
+        self.assertEqual(result['codex']['total'], 25)
+        self.assertEqual(result['history'][-2]['codex']['total'], 35)
+        self.assertEqual(result['history'][0]['date'], '2026-09-09')
+        self.assertEqual(result['date'], result['history'][-1]['date'])
+        self.assertEqual(result['codex'], result['history'][-1]['codex'])
+
+    def test_history_has_seven_local_dates_with_cumulative_daily_deltas(self):
+        self.write(self.path, [
+            codex('2026-09-07T15:59:59Z', 50, 5, 20),
+            codex('2026-09-07T16:00:00Z', 70, 7, 30),
+            codex('2026-09-10T04:00:00Z', 100, 12, 50),
+            codex('2026-09-14T04:00:00Z', 140, 18, 80),
+            codex('2026-09-14T16:00:00Z', 1000, 100, 500)])
+        self.write(self.deepseek, [claude('past', stamp='2026-09-10T04:00:00Z'),
+                                   claude('today')])
+        result = self.counter.read(NOW)
+        self.assertEqual([day['date'] for day in result['history']],
+                         [f'2026-09-{day:02}' for day in range(8, 15)])
+        self.assertEqual([day['codex']['total'] for day in result['history']],
+                         [22, 0, 35, 0, 0, 0, 46])
+        self.assertEqual([day['deepseek']['total'] for day in result['history']],
+                         [0, 0, 38, 0, 0, 0, 38])
+        self.assertEqual(result['codex']['cached'], 30)
+        self.assertEqual(result['deepseek'], result['history'][-1]['deepseek'])
+
+    def test_history_loads_older_unchanged_files_once_and_excludes_old_mtime(self):
+        self.write(self.path, [codex('2026-09-08T04:00:00Z', 10, 1)])
+        old_time = (NOW-dt.timedelta(days=6)).timestamp()
+        os.utime(self.path, (old_time, old_time))
+        outside = self.path.with_name('before-window.jsonl')
+        self.write(outside, [codex('2026-09-14T04:00:00Z', 900, 90)])
+        older_time = (NOW-dt.timedelta(days=7)).timestamp()
+        os.utime(outside, (older_time, older_time))
+        result = self.counter.read(NOW)
+        self.assertEqual(result['history'][0]['codex']['total'], 11)
+        self.assertEqual(result['codex']['total'], 0)
+        with patch.object(self.counter, '_record', wraps=self.counter._record) as parse:
+            self.assertEqual(self.counter.read(NOW)['history'], result['history'])
+            parse.assert_not_called()
+        tomorrow = NOW+dt.timedelta(days=1)
+        result = self.counter.read(tomorrow)
+        self.assertTrue(all(day['codex']['total'] == 0 for day in result['history']))
+        self.assertNotIn(self.path, self.counter.files)
+
+    def test_deepseek_message_across_midnight_and_copies_belongs_to_first_day(self):
+        self.write(self.deepseek, [claude('overnight', stamp='2026-09-13T15:59:59Z'),
+                                   claude('overnight', outputs=8, stamp='2026-09-13T16:00:01Z')])
+        self.write(self.deepseek.with_name('copy.jsonl'), [
+            claude('overnight', outputs=12, stamp='2026-09-14T00:00:00Z'),
+            claude('today')])
+        result = self.counter.read(NOW)
+        self.assertEqual(result['history'][-2]['deepseek']['total'], 45)
+        self.assertEqual(result['deepseek']['total'], 38)
+        self.write(self.deepseek, [claude('overnight', outputs=20)], 'a')
+        result = self.counter.read(NOW)
+        self.assertEqual(result['history'][-2]['deepseek']['total'], 53)
+        self.assertEqual(result['deepseek']['total'], 38)
+
+    def test_deepseek_first_message_date_is_independent_of_file_scan_order(self):
+        self.write(self.deepseek, [claude('same', outputs=20)])
+        self.write(self.deepseek.with_name('copy.jsonl'), [
+            claude('same', stamp='2026-09-12T15:00:00Z')])
+        result = self.counter.read(NOW)
+        self.assertEqual(result['history'][4]['deepseek']['total'], 53)
+        self.assertEqual(result['deepseek']['total'], 0)
+
+    def test_message_started_before_history_is_not_counted_again_on_later_updates(self):
+        self.write(self.deepseek, [claude('old', stamp='2026-09-07T15:59:59Z'),
+                                   claude('old', outputs=20, stamp='2026-09-07T16:00:01Z')])
+        result = self.counter.read(NOW)
+        self.assertTrue(all(day['deepseek']['total'] == 0 for day in result['history']))
 
     def test_first_record_uses_last_usage_when_full_baseline_is_missing(self):
         self.write(self.path, [codex('2026-09-14T00:00:00Z', 1000, 100,
@@ -85,6 +159,9 @@ class DailyTokenTests(unittest.TestCase):
         for kind in ('codex', 'deepseek'):
             self.assertFalse(result[kind]['available'])
             self.assertFalse(result[kind]['ok'])
+            for day in result['history']:
+                self.assertFalse(day[kind]['available'])
+                self.assertFalse(day[kind]['ok'])
         self.deepseek.parent.mkdir(parents=True)
         result = self.counter.read(NOW)['deepseek']
         self.assertTrue(result['ok'])

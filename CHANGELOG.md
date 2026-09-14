@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 — 2026-09-14
+
+- Add separate seven-day local token charts for Codex and DeepSeek, with midnight rollover and live updates.
+- Add optional Windows low-quota notifications with persistent deduplication and stale-data guards.
+- Show local daily cache-hit percentage beside Codex and DeepSeek token totals and in usage details.
+- Use all input tokens as the denominator; show unknown for zero input or incomplete data.
+
 ## 1.1.0 — 2026-09-14
 
 - Read-only Codex reset-credit count and expiry details.

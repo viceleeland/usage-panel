@@ -9,7 +9,7 @@
 [![Tests](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml/badge.svg)](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-173d2b?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-173d2b?style=flat-square&logo=python&logoColor=b8f3a5)
-![Version](https://img.shields.io/badge/version-1.1.0-8ce7a2?style=flat-square&labelColor=173d2b)
+![Version](https://img.shields.io/badge/version-1.2.0-8ce7a2?style=flat-square&labelColor=173d2b)
 
 [快速开始](#quick-start) · [功能一览](#features) · [构建程序](#build) · [使用说明](使用说明.md)
 
@@ -31,6 +31,9 @@
 ### 日常使用，保持轻巧
 
 - **账户与评分每 5 分钟刷新**；今日 token **每 10 秒**读取本机新记录，隐藏后也持续更新。
+- **近 7 天趋势图**，从 SUMMARY 旁的「7 天趋势」打开，Codex 与 DeepSeek 分别展示，按本地日期统计，单位为 m。
+- **低额度通知**，默认开启：Codex 剩余 ≤10%，DeepSeek 余额 ≤¥10 / $1；在「设置 / 说明」关闭。
+- **缓存命中率**，面板与明细都显示，按缓存命中 token ÷ 全部输入 token 计算，保留一位小数；当天无输入或记录不完整时显示 `—`。
 - **今日用量明细**，分别显示 Codex 与 Claude Code 中 DeepSeek 的输入、输出和缓存命中。
 - **重置卡一眼可见**，显示官方可用数量、最近到期日，点击「明细」查看已返回的到期时间。
 - **关闭即隐藏到托盘**，支持面板置顶。
@@ -107,9 +110,15 @@ py -3.12 -m venv .venv
 - Codex：读取 `CODEX_HOME` 下 `sessions/` 与 `archived_sessions/` 的 token 事件，按累计值差额统计并去重。
 - DeepSeek：读取 Claude Code 项目日志中 DeepSeek 模型的用量，按消息 ID 去重；其他 API 客户端的调用不在此范围。
 - token 统一以 m（百万）显示，保留三位小数；不足 0.001m 的非零值显示 <0.001m。输入包含缓存读取和创建；缓存命中是输入的子集，不能再加一次。推理 token 已包含在输出中。
-- 启动时补读当天保留的日志，之后增量读取；跨午夜重新按本地日期统计。日志缺失或已清理可能导致统计不完整。
+- 启动时补读最近 7 天保留的日志，之后增量读取；跨午夜重新按本地日期统计。日志缺失或已清理可能导致统计不完整。
 - 未找到日志目录显示 `—`；存在目录但当天没有可统计调用显示 `0`。
 - 不读取对话正文用于展示，不上传本地用量，不将 token 换算成未经核实的费用。
+
+### 低额度提醒怎么触发？
+
+随账户数据每 5 分钟检查，也可手动刷新。只使用成功读取的新数据，过期窗口与连接失败不触发提醒。
+
+同一低状态只通知一次；恢复正常后再次降低，或 Codex 进入新的额度周期，才重新提醒。通知状态保存在本机 `data/alert-state.json`，正常重启不会重复通知。Windows 关闭通知或开启勿扰时可能不弹出。默认仅提醒，不自动充值或使用重置卡。
 
 ## 🔐 数据留在哪里？
 
@@ -139,14 +148,16 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s source -p "test*.py"
 ```
 
-测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法、密钥发送目标，以及增量 token 统计、缓存口径、去重与跨日行为。
+测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法、密钥发送目标，以及增量 token 统计、7 天历史、缓存口径、去重、跨日行为和低额度提醒。
 
 ```text
 usage-panel/
 ├── source/
 │   ├── app.py               # 托盘与面板
 │   ├── providers.py         # 额度、余额、评分适配器
-│   ├── token_usage.py      # 本机今日 token 增量统计
+│   ├── token_usage.py      # 本机今日及 7 天 token 统计
+│   ├── alerts.py           # 低额度提醒与去重
+│   ├── test_alerts.py      # 提醒阈值及状态测试
 │   ├── test_tokens.py      # token 统计测试
 │   └── test_providers.py    # 无凭据单元测试
 ├── docs/assets/             # README 视觉资源

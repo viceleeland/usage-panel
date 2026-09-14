@@ -15,6 +15,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageGrab, ImageTk
 from providers import collect, read_json
 from token_usage import DailyTokens
+from alerts import check_alerts
 
 BASE = pathlib.Path(sys.executable).parent if getattr(sys, 'frozen', False) else pathlib.Path(__file__).resolve().parent.parent
 DATA = BASE/'data'
@@ -30,6 +31,14 @@ DEFAULT_SCORES = {name: ['']*6 for name in ['Astra','Sol','Terra','Luna']}
 
 def token_text(value):
     return '<0.001m' if 0 < value < 1000 else f'{value/1_000_000:.3f}m'
+
+def cache_hit_text(data):
+    inputs, cached = data.get('input'), data.get('cached')
+    if (not data.get('available') or data.get('partial')
+            or not isinstance(inputs, int) or not isinstance(cached, int)
+            or inputs <= 0 or not 0 <= cached <= inputs):
+        return '—'
+    return f'{cached / inputs * 100:.1f}%'
 
 def reset_text(timestamp):
     if not isinstance(timestamp, (int, float)):
@@ -80,6 +89,10 @@ class UsagePanel:
         self.scores = self.settings.get('scores', DEFAULT_SCORES.copy())
         self.radar_mode = tk.StringVar(value=self.settings.get('radar_mode','综合智能'))
         self.topmost = tk.BooleanVar(value=self.settings.get('topmost', False))
+        self.alerts_enabled = tk.BooleanVar(value=self.settings.get('alerts_enabled', True))
+        self.alert_state = read_json(DATA/'alert-state.json')
+        self.alert_status = '额度每 5 分钟检查一次'
+        self.trend_window = None
         self.root.attributes('-topmost', self.topmost.get())
         self.body = tk.Frame(self.root, bg=BG, padx=22, pady=14)
         self.body.pack(fill='both', expand=True)
@@ -186,7 +199,10 @@ class UsagePanel:
             self.label(self.body,f'旧数据 · {dt.datetime.fromtimestamp(deep["updated"]):%m/%d %H:%M}',8,'#B08129').pack(anchor='w')
         self.token_row('deepseek')
         self.line()
-        self.label(self.body, 'SUMMARY', 10, bold=True, mono=True).pack(anchor='w')
+        summary_header = tk.Frame(self.body, bg=BG)
+        summary_header.pack(fill='x')
+        self.label(summary_header, 'SUMMARY', 10, bold=True, mono=True).pack(side='left')
+        self.button(summary_header, '7 天趋势 ↗', self.show_trends).pack(side='right')
         summary = tk.Frame(self.body,bg=BG)
         summary.pack(fill='x', pady=(6,0))
         mem = psutil.virtual_memory()
@@ -233,7 +249,7 @@ class UsagePanel:
         footer.pack(fill='x')
         self.refresh_button=self.button(footer,'刷新中…' if self.busy else '↻ 刷新',self.refresh)
         self.refresh_button.pack(side='left')
-        self.button(footer,'连接说明',self.help).pack(side='left')
+        self.button(footer,'设置 / 说明',self.help).pack(side='left')
         tk.Checkbutton(footer,text='置顶',variable=self.topmost,command=self.toggle_topmost,bg=BG,fg=MUTED,
             activebackground=BG,font=(FONT,9),selectcolor=BG,bd=0).pack(side='left',padx=8)
         self.button(footer,'隐藏',self.hide).pack(side='right')
@@ -274,6 +290,8 @@ class UsagePanel:
                     self.result=value
                     self.busy=False
                     self.save_cache()
+                    if not self.args.smoke:
+                        self.process_alerts()
                     self.draw()
                     if self.args.smoke:
                         self.show()
@@ -321,9 +339,9 @@ class UsagePanel:
             elif not data.get('available'):
                 text = '今日 — · 未找到本机记录'
             elif data.get('partial'):
-                text = f'今日 {token_text(data["total"])} · 不完整统计'
+                text = f'今日 {token_text(data["total"])} · 缓存命中 — · 不完整'
             else:
-                text = f'今日 {token_text(data["total"])} token · 本机'
+                text = f'本机今日 {token_text(data["total"])} · 缓存命中 {cache_hit_text(data)}'
             label.configure(text=text)
 
     def refresh_tokens(self):
@@ -354,7 +372,7 @@ class UsagePanel:
                 lines.append(title)
                 if data.get('available') and self.tokens.get('date') == dt.datetime.now().date().isoformat():
                     lines += [f'输入 {token_text(data["input"])}  ·  输出 {token_text(data["output"])}',
-                              f'其中缓存命中 {token_text(data["cached"])}  ·  合计 {token_text(data["total"])}',
+                              f'其中缓存命中 {token_text(data["cached"])}（{cache_hit_text(data)}） · 合计 {token_text(data["total"])}',
                               '部分记录读取失败，当前为不完整统计。' if data.get('partial') else '']
                 else:
                     lines += ['尚无可用统计。', '']
@@ -369,20 +387,114 @@ class UsagePanel:
                       '卡片到期明细可能不完整。',
                       '每 10 秒读取本机日志，调用写入后才会增加。',
                       '输入含缓存；缓存命中已包含在输入中，不重复相加。',
+                      '缓存命中率 = 缓存命中 ÷ 全部输入；无输入或记录不完整显示 —。',
                       '仅统计保留在本机的记录，不包含其他设备或其他 API 客户端。',
                       'token 数量不等同于账单费用；重置卡仅展示，不自动使用。']
             if self.tokens.get('updated'):
                 lines += [f'本机记录读取于 {dt.datetime.fromtimestamp(self.tokens["updated"]):%H:%M:%S}']
             content.set('\n'.join(lines))
-            dialog.after(1000, update)
+            self.root.after(1000, update)
         update()
         self.button(dialog, '关闭', dialog.destroy).pack(anchor='e', pady=(8,0))
         return dialog
 
+    def show_trends(self):
+        if self.trend_window is not None and self.trend_window.winfo_exists():
+            self.trend_window.lift()
+            return self.trend_window
+        dialog = self.trend_window = tk.Toplevel(self.root)
+        dialog.title('近 7 天 · 本机 Token 趋势')
+        dialog.configure(bg=BG, padx=20, pady=16)
+        dialog.resizable(False, False)
+        self.label(dialog, '近 7 天用量', 14, bold=True).pack(anchor='w')
+        self.label(dialog, '本地日期 · 含今天 · m = 百万 token · 两张图分别缩放', 9, MUTED).pack(anchor='w', pady=(4,12))
+        charts = {}
+        for key, title in [('codex', 'Codex'), ('deepseek', 'DeepSeek / Claude Code')]:
+            title_var = tk.StringVar(value=title)
+            self.label(dialog, '', 10, bold=True, textvariable=title_var).pack(anchor='w')
+            canvas = tk.Canvas(dialog, width=504, height=160, bg=BG, highlightthickness=0)
+            canvas.pack(pady=(4,14))
+            charts[key] = (title, title_var, canvas)
+        status = tk.StringVar()
+        self.label(dialog, '', 8, MUTED, textvariable=status, justify='left').pack(anchor='w')
+        self.label(dialog, '仅统计本机保留日志，已删除或其他设备的调用不在内。\n— 为未读取；* 为记录不完整；缓存已计入输入，不重复相加。',
+                   8, MUTED, justify='left').pack(anchor='w', pady=(6,0))
+        self.button(dialog, '关闭', dialog.destroy).pack(anchor='e', pady=(6,0))
+
+        def redraw():
+            if not dialog.winfo_exists():
+                return
+            history = self.tokens.get('history') or []
+            if self.tokens.get('date') != dt.datetime.now().date().isoformat():
+                history = []
+            for key, (title, title_var, canvas) in charts.items():
+                canvas.delete('all')
+                if not history:
+                    title_var.set(title)
+                    canvas.create_text(252, 70, text='正在读取本机 7 天记录…', fill=MUTED, font=(FONT,10))
+                    continue
+                rows = [(day['date'], day.get(key, {})) for day in history]
+                known = [value for _, value in rows if value.get('available')]
+                complete = all(v.get('ok') for _, v in rows)
+                suffix = '' if complete else '（不完整）'
+                title_var.set(f'{title} · 7 天 {token_text(sum(v.get("total", 0) for v in known))}{suffix}' if known else title+' · 未找到本机记录')
+                maximum = max([v.get('total', 0) for v in known]+[1])
+                baseline, plot_height, left, step = 128, 94, 58, 62
+                canvas.create_line(26, baseline, 494, baseline, fill=LINE)
+                color = GREEN if key == 'codex' else '#2C9B87'
+                for i, (date, value) in enumerate(rows):
+                    x = left + i*step
+                    amount = value.get('total', 0)
+                    available = value.get('available')
+                    height = max(2, amount/maximum*plot_height) if amount > 0 else 0
+                    if available and height:
+                        canvas.create_rectangle(x-17, baseline-height, x+17, baseline,
+                            fill=MUTED if value.get('partial') else color, outline='')
+                    text = token_text(amount) if available else '—'
+                    if value.get('partial'):
+                        text += '*'
+                    canvas.create_text(x, baseline-height-11, text=text, fill=FG if available else MUTED,
+                                       font=(MONO,8))
+                    canvas.create_text(x, baseline+18, text=date[5:].replace('-', '/'), fill=MUTED, font=(MONO,9))
+            stamp = self.tokens.get('updated')
+            status.set(f'读取于 {dt.datetime.fromtimestamp(stamp):%H:%M:%S} · 每 10 秒更新' if stamp else '等待读取')
+            self.root.after(10000, redraw)
+        redraw()
+        return dialog
+
+    def process_alerts(self):
+        if not self.alerts_enabled.get():
+            return
+        notices, state = check_alerts(self.result, self.alert_state)
+        if notices:
+            try:
+                self.tray.notify('\n'.join(n['message'] for n in notices), 'Usage Panel · 低额度提醒')
+                self.alert_status = f'最近提醒 {dt.datetime.now():%m/%d %H:%M}'
+            except (OSError, NotImplementedError):
+                self.alert_status = '系统通知未发送，请检查 Windows 通知设置'
+                return
+        if state != self.alert_state:
+            self.alert_state = state
+            try:
+                DATA.mkdir(exist_ok=True)
+                target = DATA/'alert-state.tmp'
+                target.write_text(json.dumps(state), encoding='utf-8')
+                target.replace(DATA/'alert-state.json')
+            except OSError:
+                self.alert_status = '提醒记录未保存，重启后可能再次提醒'
+
+    def toggle_alerts(self):
+        try:
+            self.save_settings()
+        except OSError:
+            pass
+        self.process_alerts()
+
     def save_settings(self):
         DATA.mkdir(exist_ok=True)
         target=DATA/'settings.tmp'
-        target.write_text(json.dumps({'radar_mode':self.radar_mode.get(), 'topmost':self.topmost.get()},ensure_ascii=False,indent=2),encoding='utf-8')
+        target.write_text(json.dumps({'radar_mode':self.radar_mode.get(), 'topmost':self.topmost.get(),
+            'alerts_enabled':self.alerts_enabled.get()},ensure_ascii=False,indent=2),encoding='utf-8')
         target.replace(DATA/'settings.json')
 
     def toggle_topmost(self):
@@ -397,8 +509,12 @@ class UsagePanel:
 
     def help(self):
         dialog=tk.Toplevel(self.root)
-        dialog.title('连接说明')
+        dialog.title('设置 / 连接说明')
         dialog.configure(bg=BG,padx=20,pady=18)
+        tk.Checkbutton(dialog,text='低额度提醒',variable=self.alerts_enabled,command=self.toggle_alerts,
+            bg=BG,fg=FG,activebackground=BG,font=(FONT,10),selectcolor=BG,bd=0).pack(anchor='w')
+        self.label(dialog,'Codex 剩余 ≤10% · DeepSeek 余额 ≤¥10 / $1\n同一轮低状态只提醒一次，恢复后可再次提醒。\n'+self.alert_status,
+            9,MUTED,justify='left').pack(anchor='w',pady=(3,12))
         text=('Codex\n自动使用本机 Codex CLI 的登录读取官方额度。\n\n'
               'DeepSeek API / Claude Code\n使用 Claude Code 已配置的 DeepSeek API 密钥读取余额。\n'
               '只访问 DeepSeek 官方余额接口，不发起模型对话。\n'
@@ -431,6 +547,20 @@ class UsagePanel:
         self.root.destroy()
     def finish_smoke(self,success):
         if self.closed: return
+        if self.args.trend_screenshot and not getattr(self, '_smoke_trend_captured', False):
+            if not getattr(self, '_smoke_trend_prepared', False):
+                trend = self.show_trends()
+                trend.attributes('-topmost', True)
+                trend.geometry('+100+80')
+                self._smoke_trend_prepared = True
+            else:
+                trend = self.trend_window
+                box = (trend.winfo_rootx(), trend.winfo_rooty(), trend.winfo_rootx()+trend.winfo_width(), trend.winfo_rooty()+trend.winfo_height())
+                ImageGrab.grab(bbox=box).save(self.args.trend_screenshot)
+                trend.destroy()
+                self._smoke_trend_captured = True
+            self.root.after(700, lambda: self.finish_smoke(success))
+            return
         self.show()
         self.root.update()
         if self.args.screenshot:
@@ -456,6 +586,8 @@ class UsagePanel:
                 'hide_show_ok':hidden_ok and shown_ok,'score_switch_ok':switched_ok,
                 'tokens_loaded': bool(self.tokens.get('updated')), 'reset_credits_loaded': self.result.get('codex', {}).get('reset_credits', {}).get('count') is not None,
                 'details_ok': bool(details_ok),
+                'history_days': len(self.tokens.get('history', [])),
+                'cache_rate_visible': all('缓存命中' in label.cget('text') for label in self.token_labels.values()),
                 'width':self.root.winfo_width(),'height':self.root.winfo_height()},indent=2),encoding='utf-8')
         self.quit()
 
@@ -466,6 +598,7 @@ def main():
     parser.add_argument('--hidden',action='store_true')
     parser.add_argument('--smoke',action='store_true')
     parser.add_argument('--screenshot')
+    parser.add_argument('--trend-screenshot')
     parser.add_argument('--report')
     args=parser.parse_args()
     # Prevent duplicate tray instances; the OS releases this handle on exit.

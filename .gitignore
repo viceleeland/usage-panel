@@ -1,0 +1,26 @@
+# Private runtime state
+data/
+.env
+.env.*
+!.env.example
+*.credentials.json
+usage-cache.json
+
+# Generated programs and screenshots
+*.exe
+*.zip
+*.png
+*.ico
+*.spec
+build/
+dist/
+
+# Python / local tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.idea/
+.vscode/
+*.log

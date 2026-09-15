@@ -24,3 +24,5 @@ venv/
 .idea/
 .vscode/
 *.log
+*.dmp
+*.hdmp

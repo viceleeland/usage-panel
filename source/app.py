@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import datetime as dt
+import gc
 import json
 import pathlib
 import queue
@@ -61,6 +62,38 @@ def tray_image():
         draw.rounded_rectangle((x,49-h,x+8,49), radius=3, fill=GREEN)
     return im
 
+class DialogRefresh:
+    """Keep periodic callbacks alive only while their dialog exists."""
+
+    def __init__(self, dialog, interval, callback):
+        self.dialog = dialog
+        self.interval = interval
+        self.callback = callback
+        self.after_id = None
+        dialog.bind('<Destroy>', self.stop, add='+')
+        self.run()
+
+    def run(self):
+        self.after_id = None
+        dialog = self.dialog
+        if dialog is None:
+            return
+        self.callback()
+        if self.dialog is dialog:
+            self.after_id = dialog.after(self.interval, self.run)
+
+    def stop(self, event):
+        dialog = self.dialog
+        if dialog is None or event.widget is not dialog:
+            return
+        self.dialog = None
+        if self.after_id is not None:
+            dialog.after_cancel(self.after_id)
+            self.after_id = None
+        # Drop closures containing StringVars now, on Tk's owning thread.
+        self.callback = None
+
+
 class UsagePanel:
     def __init__(self, args):
         self.args = args
@@ -77,6 +110,7 @@ class UsagePanel:
         self.messages = queue.Queue()
         self.busy = False
         self.closed = False
+        self.layout_after = None
         self.token_reader = DailyTokens()
         self.token_busy = False
         self.tokens = {}
@@ -97,12 +131,19 @@ class UsagePanel:
         self.alert_status = '额度每 5 分钟检查一次'
         self.trend_window = None
         self.root.attributes('-topmost', self.topmost.get())
-        self.body = tk.Frame(self.root, bg=BG, padx=22, pady=14)
+        self.container = tk.Frame(self.root, bg=BG, padx=22, pady=14)
+        self.container.pack(fill='both', expand=True)
+        self.body = tk.Frame(self.container, bg=BG)
         self.body.pack(fill='both', expand=True)
+        self.score_section = tk.Frame(self.container, bg=BG)
+        self.score_section.pack(fill='x')
+        self.footer = tk.Frame(self.container, bg=BG)
+        self.footer.pack(fill='x')
+        messages = self.messages
         self.tray = pystray.Icon('UsagePanel', tray_image(), 'AI 用量 · 正在读取', pystray.Menu(
-            pystray.MenuItem('显示面板', lambda *_: self.messages.put(('show', None)), default=True),
-            pystray.MenuItem('刷新用量', lambda *_: self.messages.put(('refresh', None))),
-            pystray.MenuItem('退出', lambda *_: self.messages.put(('quit', None)))))
+            pystray.MenuItem('显示面板', lambda *_: messages.put(('show', None)), default=True),
+            pystray.MenuItem('刷新用量', lambda *_: messages.put(('refresh', None))),
+            pystray.MenuItem('退出', lambda *_: messages.put(('quit', None)))))
         self.tray.run_detached()
         self.draw()
         self.root.update_idletasks()
@@ -226,25 +267,63 @@ class UsagePanel:
                 names.append(name)
         self.label(self.body, f'进程  Codex {names.count("codex.exe")}  ·  Claude {names.count("claude.exe")}（不等于活动任务数）',8,MUTED).pack(anchor='w',pady=(5,0))
         self.line()
-        iqhead=tk.Frame(self.body,bg=BG)
+        self.update_scores()
+        if not hasattr(self, 'refresh_button'):
+            self.build_footer()
+        self.refresh_button.configure(text='刷新中…' if self.busy else '↻ 刷新',
+                                      state='disabled' if self.busy else 'normal')
+        timestamps=[v.get('updated',0) for v in self.result.values() if isinstance(v,dict)]
+        last=max(timestamps,default=0)
+        stamp=dt.datetime.fromtimestamp(last).strftime('%H:%M:%S') if last else '等待首次读取'
+        self.updated_label.configure(text=f'账户更新 {stamp} · 每 5 分钟 · token 每 10 秒')
+        self.tray.title=('AI 用量 · '+' | '.join(tooltip))[:127] if tooltip else 'AI 用量 · 尚未接入'
+        if self.layout_after is None:
+            self.layout_after = self.root.after_idle(self.keep_on_screen)
+
+    def keep_on_screen(self):
+        self.layout_after = None
+        if self.closed:
+            return
+        if self.root.winfo_y()+self.root.winfo_reqheight()>self.root.winfo_screenheight()-55:
+            self.root.geometry(f'+{max(0,self.root.winfo_x())}+{max(0,self.root.winfo_screenheight()-self.root.winfo_reqheight()-65)}')
+
+    def build_scores(self):
+        # Keep the native menu alive while Windows finishes dispatching a choice.
+        # Account refreshes also leave these widgets in place.
+        iqhead=tk.Frame(self.score_section,bg=BG)
         iqhead.pack(fill='x')
         self.label(iqhead,'IQ / 模型评分',10,bold=True,mono=True).pack(side='left')
-        mode=tk.OptionMenu(iqhead,self.radar_mode,'综合智能','软件工程','视觉空间',command=lambda _:self.change_mode())
+        mode=self.radar_selector=tk.OptionMenu(iqhead,self.radar_mode,'综合智能','软件工程','视觉空间',command=lambda _:self.change_mode())
         mode.configure(bg=BG,fg=MUTED,highlightthickness=0,relief='flat',font=(FONT,9))
         mode.pack(side='right')
-        radar=self.result.get('radar',{})
-        self.scores=radar.get('tables',{}).get(self.radar_mode.get(),{name:['']*6 for name in DEFAULT_SCORES})
-        table=tk.Frame(self.body,bg=BG)
+        table=tk.Frame(self.score_section,bg=BG)
         table.pack(fill='x',pady=(4,0))
         for col, text in enumerate(['模型']+LEVELS):
             self.label(table,text,9,MUTED,mono=True,width=7,anchor='w' if col==0 else 'center').grid(row=0,column=col,pady=2)
-        for row,(name, values) in enumerate(self.scores.items(),1):
+        self.score_labels = {}
+        for row,name in enumerate(DEFAULT_SCORES,1):
             self.label(table,name,10,FG,bold=name=='Astra',mono=True,anchor='w').grid(row=row,column=0,sticky='w',pady=2)
             for col in range(6):
+                label = self.label(table,'—',10,MUTED,mono=True)
+                label.grid(row=row,column=col+1)
+                self.score_labels[name, col] = label
+        self.radar_note=self.label(self.score_section,'',8,MUTED)
+        self.radar_note.pack(anchor='w',pady=(5,0))
+        self.label(self.score_section,'社区基准分，非人的智商；— 表示该档位暂无数据',8,MUTED).pack(anchor='w')
+        self.radar_stamp=self.label(self.score_section,'',8,MUTED)
+
+    def update_scores(self):
+        if not hasattr(self, 'score_labels'):
+            self.build_scores()
+        radar=self.result.get('radar',{})
+        self.scores=radar.get('tables',{}).get(self.radar_mode.get(),{name:['']*6 for name in DEFAULT_SCORES})
+        for name in DEFAULT_SCORES:
+            values = self.scores.get(name, [])
+            for col in range(6):
                 value = values[col] if col<len(values) else ''
-                self.label(table,str(value) if value!='' else '—',10,FG if value!='' else MUTED,mono=True).grid(row=row,column=col+1)
-        self.label(self.body,radar.get('note','正在读取 Codex Radar…'),8,MUTED).pack(anchor='w',pady=(5,0))
-        self.label(self.body,'社区基准分，非人的智商；— 表示该档位暂无数据',8,MUTED).pack(anchor='w')
+                self.score_labels[name, col].configure(text=str(value) if value!='' else '—',
+                                                      fg=FG if value!='' else MUTED)
+        self.radar_note.configure(text=radar.get('note','正在读取 Codex Radar…'))
         stamp=radar.get('software_updated') if self.radar_mode.get()!='视觉空间' else radar.get('visual_updated')
         if stamp:
             try: stamp=dt.datetime.fromisoformat(stamp.replace('Z','+00:00')).astimezone().strftime('%m/%d %H:%M')
@@ -253,9 +332,14 @@ class UsagePanel:
                 try: visual_stamp=dt.datetime.fromisoformat(radar['visual_updated'].replace('Z','+00:00')).astimezone().strftime('%m/%d %H:%M')
                 except ValueError: visual_stamp='未提供'
                 stamp=f'软工 {stamp} · 视觉 {visual_stamp}'
-            self.label(self.body,('旧数据 · ' if not radar.get('ok') else '')+'源更新 '+stamp,8,MUTED).pack(anchor='w')
-        self.line()
-        footer=tk.Frame(self.body,bg=BG)
+            self.radar_stamp.configure(text=('旧数据 · ' if not radar.get('ok') else '')+'源更新 '+stamp)
+            self.radar_stamp.pack(anchor='w')
+        else:
+            self.radar_stamp.pack_forget()
+
+    def build_footer(self):
+        tk.Frame(self.footer, bg=LINE, height=1).pack(fill='x', pady=5)
+        footer=tk.Frame(self.footer,bg=BG)
         footer.pack(fill='x')
         self.refresh_button=self.button(footer,'刷新中…' if self.busy else '↻ 刷新',self.refresh)
         self.refresh_button.pack(side='left')
@@ -264,26 +348,21 @@ class UsagePanel:
             activebackground=BG,font=(FONT,9),selectcolor=BG,bd=0).pack(side='left',padx=8)
         self.button(footer,'隐藏',self.hide).pack(side='right')
         self.button(footer,'退出',self.quit).pack(side='right')
-        timestamps=[v.get('updated',0) for v in self.result.values() if isinstance(v,dict)]
-        last=max(timestamps,default=0)
-        stamp=dt.datetime.fromtimestamp(last).strftime('%H:%M:%S') if last else '等待首次读取'
-        self.label(self.body,f'账户更新 {stamp} · 每 5 分钟 · token 每 10 秒',8,MUTED).pack(anchor='w',pady=(5,0))
-        self.tray.title=('AI 用量 · '+' | '.join(tooltip))[:127] if tooltip else 'AI 用量 · 尚未接入'
-        self.root.update_idletasks()
-        if self.root.winfo_y()+self.root.winfo_reqheight()>self.root.winfo_screenheight()-55:
-            self.root.geometry(f'+{max(0,self.root.winfo_x())}+{max(0,self.root.winfo_screenheight()-self.root.winfo_reqheight()-65)}')
+        self.updated_label=self.label(self.footer,'',8,MUTED)
+        self.updated_label.pack(anchor='w',pady=(5,0))
 
     def refresh(self):
         if self.busy or self.closed:
             return
         self.busy=True
         self.refresh_button.configure(text='刷新中…',state='disabled')
+        messages = self.messages
         def worker():
             try:
                 result=collect()
-                self.messages.put(('result',result))
+                messages.put(('result',result))
             except Exception:
-                self.messages.put(('error',None))
+                messages.put(('error',None))
         threading.Thread(target=worker,daemon=True).start()
 
     def poll(self):
@@ -371,24 +450,23 @@ class UsagePanel:
         if self.closed or self.token_busy:
             return
         self.token_busy = True
+        reader, messages = self.token_reader, self.messages
         def worker():
             try:
-                result = self.token_reader.read()
+                result = reader.read()
             except Exception:
                 result = {'date': dt.datetime.now().date().isoformat(),
                           'codex': {'available': False}, 'deepseek': {'available': False}}
-            self.messages.put(('tokens', result))
+            messages.put(('tokens', result))
         threading.Thread(target=worker, daemon=True).start()
 
     def usage_details(self):
         dialog = tk.Toplevel(self.root)
         dialog.title('今日用量与重置卡')
         dialog.configure(bg=BG, padx=20, pady=16)
-        content = tk.StringVar()
+        content = tk.StringVar(master=dialog)
         self.label(dialog, '', 10, justify='left', textvariable=content).pack(anchor='w')
         def update():
-            if not dialog.winfo_exists():
-                return
             account = self.result.get('codex', {})
             daily = account.get('daily_usage') or {}
             latest = max(daily.get('buckets') or [], key=lambda b: b['date'], default=None)
@@ -423,8 +501,7 @@ class UsagePanel:
             if self.tokens.get('updated'):
                 lines += [f'本机记录读取于 {dt.datetime.fromtimestamp(self.tokens["updated"]):%H:%M:%S}']
             content.set('\n'.join(lines))
-            self.root.after(1000, update)
-        update()
+        DialogRefresh(dialog, 1000, update)
         self.button(dialog, '关闭', dialog.destroy).pack(anchor='e', pady=(8,0))
         return dialog
 
@@ -440,20 +517,18 @@ class UsagePanel:
         self.label(dialog, '含今天 · m = 百万 token · 两张图分别缩放', 9, MUTED).pack(anchor='w', pady=(4,12))
         charts = {}
         for key, title in [('codex', 'Codex'), ('deepseek', 'DeepSeek / Claude Code')]:
-            title_var = tk.StringVar(value=title)
+            title_var = tk.StringVar(master=dialog, value=title)
             self.label(dialog, '', 10, bold=True, textvariable=title_var).pack(anchor='w')
             canvas = tk.Canvas(dialog, width=504, height=160, bg=BG, highlightthickness=0)
             canvas.pack(pady=(4,14))
             charts[key] = (title, title_var, canvas)
-        status = tk.StringVar()
+        status = tk.StringVar(master=dialog)
         self.label(dialog, '', 8, MUTED, textvariable=status, justify='left').pack(anchor='w')
         self.label(dialog, 'Codex 沿用官方日期和总量；≈ / 橙色为今日本机暂估，不计入官方合计。\nDeepSeek 仍按本机本地日期统计；— 为未提供，* 为不完整，旧为缓存。',
                    8, MUTED, justify='left').pack(anchor='w', pady=(6,0))
         self.button(dialog, '关闭', dialog.destroy).pack(anchor='e', pady=(6,0))
 
         def redraw():
-            if not dialog.winfo_exists():
-                return
             history = self.tokens.get('history') or []
             if self.tokens.get('date') != dt.datetime.now().date().isoformat():
                 history = []
@@ -505,8 +580,7 @@ class UsagePanel:
             official_time = dt.datetime.fromtimestamp(official_stamp).strftime('%H:%M:%S') if official_stamp else '未提供'
             local_time = dt.datetime.fromtimestamp(stamp).strftime('%H:%M:%S') if stamp else '未读取'
             status.set(f'官方 {official_time} · 每 5 分钟  /  本机 {local_time} · 每 10 秒')
-            self.root.after(10000, redraw)
-        redraw()
+        DialogRefresh(dialog, 10000, redraw)
         return dialog
 
     def process_alerts(self):
@@ -552,7 +626,7 @@ class UsagePanel:
     def change_mode(self):
         try: self.save_settings()
         except OSError: pass
-        self.draw()
+        self.update_scores()
 
     def help(self):
         dialog=tk.Toplevel(self.root)
@@ -590,8 +664,16 @@ class UsagePanel:
     def quit(self):
         if self.closed: return
         self.closed=True
-        self.tray.stop()
-        self.root.destroy()
+        # Each dialog cancels callbacks through the widget that registered them.
+        for child in self.root.winfo_children():
+            if isinstance(child, tk.Toplevel):
+                child.destroy()
+        for callback in self.root.tk.call('after', 'info'):
+            self.root.after_cancel(callback)
+        try:
+            self.tray.stop()
+        finally:
+            self.root.destroy()
     def finish_smoke(self,success):
         if self.closed: return
         if self.args.trend_screenshot and not getattr(self, '_smoke_trend_captured', False):
@@ -658,7 +740,17 @@ def main():
     if kernel.GetLastError()==183:
         ctypes.windll.user32.MessageBoxW(None,'用量面板已经在运行，请点击系统托盘里的绿色图标。','Usage Panel',0)
         return
-    UsagePanel(args).root.mainloop()
-    kernel.CloseHandle(ctypes.c_void_p(handle))
+    panel = None
+    try:
+        panel = UsagePanel(args)
+        panel.root.mainloop()
+    finally:
+        if panel is not None:
+            panel.quit()
+            # Release retired callbacks and their Tk objects on the UI thread.
+            gc.collect()
+            panel = None
+            gc.collect()
+        kernel.CloseHandle(ctypes.c_void_p(handle))
 
 if __name__=='__main__': main()

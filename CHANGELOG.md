@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.1 — 2026-09-15
+
+- Fix a native Windows crash when choosing an IQ category: update scores in place and preserve the menu across account refreshes.
+- Keep UI cleanup on the main thread when quitting during background reads.
+- Cancel closed details/trend window timers and release their callbacks on the UI thread.
+- Add synthetic Windows GUI regressions for native menu selection, dialog cleanup, and exit during pending reads.
+
 ## 1.3.0 — 2026-09-14
 
 - Prefer official Codex daily token totals and preserve service date labels.

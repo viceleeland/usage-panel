@@ -9,7 +9,7 @@
 [![Tests](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml/badge.svg)](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-173d2b?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-173d2b?style=flat-square&logo=python&logoColor=b8f3a5)
-![Version](https://img.shields.io/badge/version-1.3.0-8ce7a2?style=flat-square&labelColor=173d2b)
+![Version](https://img.shields.io/badge/version-1.3.1-8ce7a2?style=flat-square&labelColor=173d2b)
 
 [快速开始](#quick-start) · [功能一览](#features) · [构建程序](#build) · [使用说明](使用说明.md)
 
@@ -154,6 +154,13 @@ py -3.12 -m venv .venv
 ```
 
 测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法、密钥发送目标，以及增量 token 统计、7 天历史、缓存口径、去重、跨日行为、低额度提醒、官方日期保留与数据来源选择。
+
+安装运行依赖后，可在 Windows 桌面运行界面回归。它们使用模拟数据，检查原生下拉菜单切换、弹窗关闭和后台读取途中退出：
+
+```powershell
+.\.venv\Scripts\python.exe source/ui_regression.py
+.\.venv\Scripts\python.exe source/ui_menu_regression.py
+```
 
 ```text
 usage-panel/

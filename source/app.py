@@ -214,7 +214,7 @@ class UsagePanel:
                 latest = max(daily.get('buckets') or [], key=lambda b: b['date'], default=None)
                 note = data.get('note', '正在读取本机登录状态…')
                 if latest and data.get('ok'):
-                    note = f'官方日用量 {latest["date"][5:]}  {token_text(latest["total"])}'
+                    note = f'官方已报 {latest["date"][5:]}  {token_text(latest["total"])} · 可能延迟'
                     if not daily.get('ok'):
                         note += ' · 旧数据'
                 self.label(self.body, note, 8, MUTED,
@@ -272,10 +272,7 @@ class UsagePanel:
             self.build_footer()
         self.refresh_button.configure(text='刷新中…' if self.busy else '↻ 刷新',
                                       state='disabled' if self.busy else 'normal')
-        timestamps=[v.get('updated',0) for v in self.result.values() if isinstance(v,dict)]
-        last=max(timestamps,default=0)
-        stamp=dt.datetime.fromtimestamp(last).strftime('%H:%M:%S') if last else '等待首次读取'
-        self.updated_label.configure(text=f'账户更新 {stamp} · 每 5 分钟 · token 每 10 秒')
+        self.update_refresh_status()
         self.tray.title=('AI 用量 · '+' | '.join(tooltip))[:127] if tooltip else 'AI 用量 · 尚未接入'
         if self.layout_after is None:
             self.layout_after = self.root.after_idle(self.keep_on_screen)
@@ -426,21 +423,27 @@ class UsagePanel:
         fresh = self.tokens.get('date') == dt.datetime.now().date().isoformat()
         for kind, label in self.token_labels.items():
             data = self.tokens.get(kind, {})
-            official_today = self.codex_rows()[-1] if kind == 'codex' else None
-            if official_today and official_today['source'] == 'official':
-                stale = '（旧）' if not official_today['ok'] else ''
-                rate = cache_hit_text(data) if fresh else '—'
-                text = f'官方今日 {token_text(official_today["total"])}{stale} · 本机缓存命中 {rate}'
-            elif not fresh or not data:
-                text = '今日 — · 正在读取本机记录'
+            # Official daily buckets can lag or remain cached. Keep this live
+            # local counter visible regardless of whether a bucket exists.
+            if not fresh or not data:
+                text = '本机今日 — · 正在读取本机记录'
             elif not data.get('available'):
-                text = '今日 — · 未找到本机记录'
+                text = '本机今日 — · 未找到本机记录'
             elif data.get('partial'):
-                text = f'今日 {token_text(data["total"])} · 缓存命中 — · 不完整'
+                text = f'本机今日 {token_text(data["total"])} · 缓存命中 — · 不完整'
             else:
-                prefix = '今日暂估' if kind == 'codex' else '本机今日'
-                text = f'{prefix} {token_text(data["total"])} · 本机缓存命中 {cache_hit_text(data)}'
+                text = f'本机今日 {token_text(data["total"])} · 本机缓存命中 {cache_hit_text(data)}'
             label.configure(text=text)
+        self.update_refresh_status()
+
+    def update_refresh_status(self):
+        if not hasattr(self, 'updated_label'):
+            return
+        def stamp(value):
+            return dt.datetime.fromtimestamp(value).strftime('%H:%M:%S') if value else '等待读取'
+        quota = stamp(self.result.get('codex', {}).get('updated'))
+        local = stamp(self.tokens.get('updated'))
+        self.updated_label.configure(text=f'额度读取 {quota} · 本机读取 {local}（10 秒）')
 
     def codex_rows(self):
         return codex_daily_rows(self.result.get('codex', {}).get('daily_usage'), self.tokens,
@@ -476,7 +479,7 @@ class UsagePanel:
             else:
                 lines += ['官方日统计暂未提供。']
             if self.codex_rows()[-1]['source'] != 'official':
-                lines += ['今天官方尚未返回；面板暂用本机记录估算。']
+                lines += ['今天官方尚未返回；趋势图以本机暂估单独标注。']
             lines += ['', f'本机今日明细 · {dt.datetime.now():%Y-%m-%d} · 本地时区']
             for key, title in [('codex', 'Codex'), ('deepseek', 'DeepSeek / Claude Code')]:
                 data = self.tokens.get(key, {})
@@ -495,7 +498,8 @@ class UsagePanel:
             lines += [f'到期 {dt.datetime.fromtimestamp(stamp):%Y-%m-%d %H:%M}' for stamp in credits.get('expires', [])]
             lines += ['', 'm = 百万 token；卡片仅展示，到期明细可能不完整。',
                       '官方日统计每 5 分钟读取，日期与数值沿用官方，可能有延迟。',
-                      '本机明细每 10 秒更新，仅含本机保留日志，不等同于官方总量。',
+                      '面板本机今日与明细每 10 秒更新，不受官方统计延迟影响。',
+                      '本机计数仅含本机保留日志，不等同于官方总量，不与官方相加。',
                       '本机缓存命中率 = 缓存命中 ÷ 输入（输入已含缓存）。',
                       '无输入或记录不完整显示 —；token 数量不等同于账单费用。']
             if self.tokens.get('updated'):
@@ -639,7 +643,7 @@ class UsagePanel:
         text=('Codex\n自动使用本机 Codex CLI 的登录读取官方额度。\n\n'
               'DeepSeek API / Claude Code\n使用 Claude Code 已配置的 DeepSeek API 密钥读取余额。\n'
               '只访问 DeepSeek 官方余额接口，不发起模型对话。\n'
-              'Codex 日统计优先官方；今天尚未提供时显示本机暂估。\n'
+              '本机今日始终显示实时记录；官方已报单独显示，可能延迟。\n'
               '官方每 5 分钟读取，本机 token 与缓存命中率每 10 秒更新。\n\n'
               '数据说明\n进度条显示剩余比例；未返回的窗口不显示。\n'
               '读取失败时保留旧值并标注，过期值不当作新额度。\n'
@@ -676,6 +680,12 @@ class UsagePanel:
             self.root.destroy()
     def finish_smoke(self,success):
         if self.closed: return
+        # Fast provider failures can finish before the first local log scan.
+        # Wait for that scan before accepting a successful packaged smoke run;
+        # the existing 55-second failure deadline still bounds the wait.
+        if success and self.token_busy and not self.tokens.get('updated'):
+            self.root.after(500, lambda: self.finish_smoke(success))
+            return
         if self.args.trend_screenshot and not getattr(self, '_smoke_trend_captured', False):
             if not getattr(self, '_smoke_trend_prepared', False):
                 trend = self.show_trends()

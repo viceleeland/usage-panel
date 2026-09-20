@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.2 — 2026-09-20
+
+- Keep today's local token counter visible and updating even when an official daily total is delayed or cached.
+- Display the official reported total separately with a delay notice; preserve official totals in the seven-day chart.
+- Show separate quota and local read times, updating the local timestamp after each token scan.
+- Add Windows GUI regression coverage for growing local totals, stale official totals, midnight, missing logs, partial reads, and zero usage.
+
 ## 1.3.1 — 2026-09-15
 
 - Fix a native Windows crash when choosing an IQ category: update scores in place and preserve the menu across account refreshes.

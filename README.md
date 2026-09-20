@@ -9,7 +9,7 @@
 [![Tests](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml/badge.svg)](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-173d2b?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-173d2b?style=flat-square&logo=python&logoColor=b8f3a5)
-![Version](https://img.shields.io/badge/version-1.3.1-8ce7a2?style=flat-square&labelColor=173d2b)
+![Version](https://img.shields.io/badge/version-1.3.2-8ce7a2?style=flat-square&labelColor=173d2b)
 
 [快速开始](#quick-start) · [功能一览](#features) · [构建程序](#build) · [使用说明](使用说明.md)
 
@@ -32,7 +32,8 @@
 
 - **账户、官方日统计与评分每 5 分钟刷新**；本机 token 和缓存明细每 10 秒增量更新，隐藏后也持续读取。
 - **近 7 天趋势图**，从 SUMMARY 旁打开：Codex 使用官方返回的日期与总量；DeepSeek 使用本机日志，单位为 m。
-- **官方优先**：Codex 今日已有官方值时直接显示；未返回时，橙色 `≈` 柱表示今日本机暂估，不计入官方合计。过去日期缺失显示 `—`。
+- **今日实时可见**：主面板「本机今日」始终显示本机实时计数，官方已报值单独显示并标明可能延迟；底部分别显示额度与本机读取时间。
+- **趋势图官方优先**：Codex 今日已有官方值时使用官方值；未返回时，橙色 `≈` 柱表示今日本机暂估，不计入官方合计。过去日期缺失显示 `—`。
 - **低额度通知**，默认开启：Codex 剩余 ≤10%，DeepSeek 余额 ≤¥10 / $1；在「设置 / 说明」关闭。
 - **缓存命中率**，面板与明细都显示，按缓存命中 token ÷ 全部输入 token 计算，保留一位小数；当天无输入或记录不完整时显示 `—`。
 - **今日用量明细**，分别显示 Codex 与 Claude Code 中 DeepSeek 的输入、输出和缓存命中。
@@ -108,7 +109,9 @@ py -3.12 -m venv .venv
 
 **Codex 历史以官方日统计为准。** 通过 `account/usage/read` 读取日期和 token 总量，直接沿用 `startDate`，不按电脑时区平移。主面板显示最近已报的官方值；趋势图的官方合计只包含当前 7 天范围内实际返回的官方值。官方数据可能延迟，不等同于逐 token 实时计数。
 
-若今天尚未返回官方值，使用本机暂估并明确标注；一旦官方值出现就替换它，不把两者相加。过去日期缺失显示 `—`，合法的官方零值才显示 `0`。日统计读取失败保留上次成功数据和时间，并标为旧数据，不影响额度与重置卡读取。
+主面板「本机今日」始终显示每 10 秒读取的本机计数，官方值出现、延迟或读取失败都不会遮住它。两种统计口径分开显示，不相加。底部「本机读取」时间随本机读取更新，不依赖账户、余额或评分刷新。
+
+趋势图中，若今天尚未返回官方值，使用本机暂估并明确标注；一旦官方值出现就替换暂估。过去日期缺失显示 `—`，合法的官方零值才显示 `0`。日统计读取失败保留上次成功数据和时间，并标为旧数据，不影响额度与重置卡读取。
 
 **本机明细**（输入、输出、缓存命中率）仍按电脑本地日期统计。DeepSeek 当前也仅有本机 token 记录，因此这些数字不应直接与官方账户总量等同：
 

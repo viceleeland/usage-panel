@@ -4,6 +4,7 @@ Runs a disposable child process with synthetic providers and no system tray or
 account access. Kept separate from the standard-library provider test suite.
 """
 import argparse
+import datetime as dt
 import gc
 import pathlib
 import subprocess
@@ -11,6 +12,75 @@ import sys
 import threading
 import time
 import weakref
+
+
+def local_tokens_remain_live_with_official_totals():
+    import app
+
+    panel = app.UsagePanel.__new__(app.UsagePanel)
+    panel.root = app.tk.Tk()
+    panel.root.withdraw()
+    panel.token_labels = {'codex': app.tk.Label(panel.root)}
+    panel.updated_label = app.tk.Label(panel.root)
+    today = dt.datetime.now().date()
+    official_total = 11322000
+
+    def local(total=12000000, **fields):
+        values = dict(available=True, ok=True, partial=False, total=total,
+                      input=10000000, cached=9690000, output=2000000)
+        values.update(fields)
+        return values
+
+    def visible(data, date=None):
+        panel.tokens = {'date': (date or today).isoformat(), 'codex': data}
+        panel.update_token_labels()
+        return panel.token_labels['codex'].cget('text')
+
+    try:
+        for official_ok in (True, False):
+            panel.result = {'codex': {'daily_usage': {
+                'ok': official_ok, 'buckets': [
+                    {'date': today.isoformat(), 'total': official_total}]}}}
+            first = visible(local())
+            second = visible(local(total=18000000))
+            assert '本机今日 12.000m' in first, (
+                f'Official data hid the live local total: {first!r}')
+            assert '本机今日 18.000m' in second, (
+                f'Local total did not increase with new records: {second!r}')
+            assert first != second
+            assert '11.322m' not in first + second
+            assert '本机缓存命中 96.9%' in second
+            assert panel.codex_rows()[-1]['total'] == official_total, (
+                'Displaying live local tokens changed the official trend total')
+
+        yesterday = visible(local(), today-dt.timedelta(days=1))
+        assert '—' in yesterday and '正在读取' in yesterday, yesterday
+        assert '12.000m' not in yesterday and '11.322m' not in yesterday
+        missing = visible({'available': False})
+        assert '—' in missing and '未找到本机记录' in missing, missing
+        assert '0.000m' not in missing and '11.322m' not in missing
+        partial = visible(local(total=3000000, partial=True, ok=False))
+        assert '本机今日 3.000m' in partial and '不完整' in partial, partial
+        assert '缓存命中 —' in partial, partial
+        zero = visible(local(total=0, input=0, cached=0, output=0))
+        assert '本机今日 0.000m' in zero and '缓存命中 —' in zero, zero
+        panel.result['codex']['updated'] = 100
+        panel.result['radar'] = {'updated': 9999}
+        panel.tokens['updated'] = 200
+        panel.update_token_labels()
+        first_stamp = panel.updated_label.cget('text')
+        panel.tokens['updated'] = 210
+        panel.update_token_labels()
+        second_stamp = panel.updated_label.cget('text')
+        assert first_stamp != second_stamp, 'Local read time did not advance'
+        quota_stamp = dt.datetime.fromtimestamp(100).strftime('%H:%M:%S')
+        assert f'额度读取 {quota_stamp}' in second_stamp, second_stamp
+        local_stamp = dt.datetime.fromtimestamp(210).strftime('%H:%M:%S')
+        assert f'本机读取 {local_stamp}' in second_stamp, second_stamp
+    finally:
+        panel.root.destroy()
+    print('PASS: healthy/stale official totals never mask local token growth; '
+          'midnight, missing, partial and zero local states stay explicit')
 
 
 def shutdown_with_pending_workers():
@@ -194,17 +264,19 @@ def shutdown_with_open_dialogs():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--child', choices=['shutdown', 'dialogs', 'open-dialogs'])
+    parser.add_argument('--child', choices=['tokens', 'shutdown', 'dialogs', 'open-dialogs'])
     args = parser.parse_args()
     if args.child:
-        if args.child == 'shutdown':
+        if args.child == 'tokens':
+            local_tokens_remain_live_with_official_totals()
+        elif args.child == 'shutdown':
             shutdown_with_pending_workers()
         elif args.child == 'open-dialogs':
             shutdown_with_open_dialogs()
         else:
             closed_dialogs_with_background_gc()
         return
-    for scenario in ('shutdown', 'dialogs', 'open-dialogs'):
+    for scenario in ('tokens', 'shutdown', 'dialogs', 'open-dialogs'):
         result = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()),
                                  '--child', scenario], capture_output=True, text=True, timeout=30)
         print(result.stdout, end='')

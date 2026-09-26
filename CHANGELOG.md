@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0 — 2026-09-26
+
+- Add configurable monthly billing-cycle analytics with main/subagent attribution and per-model reasoning-effort breakdowns.
+- Estimate Standard API-equivalent token costs using verified rates; retain unknown prices and distinguish partial projections from full-cycle forecasts.
+- Add daily cost trends, recent-hour usage pace, an optional comparison budget, searchable/filterable tables, and CSV/JSON exports of the current selection.
+- Deduplicate response and cumulative usage events, exclude inherited agent history, and preserve missing cache/model metadata as unknown.
+- Document local-log coverage, non-billing estimates, pricing sources, and independently implemented interaction references; add cycle, attribution, pricing, and forecast tests.
+
 ## 1.3.2 — 2026-09-20
 
 - Keep today's local token counter visible and updating even when an official daily total is delayed or cached.

@@ -2,14 +2,14 @@
 
 ![Usage Panel — Your AI, at a glance](docs/assets/hero.svg)
 
-### 额度 · 重置卡 · 今日 Token · 模型评分。
+### 额度 · 月度费用 · Agent 用量 · 模型评分。
 
 让 **Codex、DeepSeek API 和 Codex Radar** 待在桌面一角，随时查看。
 
 [![Tests](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml/badge.svg)](https://github.com/viceleeland/usage-panel/actions/workflows/tests.yml)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-173d2b?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-173d2b?style=flat-square&logo=python&logoColor=b8f3a5)
-![Version](https://img.shields.io/badge/version-1.3.2-8ce7a2?style=flat-square&labelColor=173d2b)
+![Version](https://img.shields.io/badge/version-1.4.0-8ce7a2?style=flat-square&labelColor=173d2b)
 
 [快速开始](#quick-start) · [功能一览](#features) · [构建程序](#build) · [使用说明](使用说明.md)
 
@@ -21,12 +21,16 @@
 
 <a id="features"></a>
 
+![月度费用与 Agent 分析界面](docs/assets/analytics-preview.png)
+
+<sub>界面使用合成示例数据；金额为 API 基础 Token 折算，非实际账单。</sub>
+
 ## 🟢 小面板，三种视角
 
 | **01 / CODEX** | **02 / DEEPSEEK** | **03 / MODEL RADAR** |
 | :--- | :--- | :--- |
 | **还剩多少额度？** | **API 账户还有多少余额？** | **各档位表现如何？** |
-| 官方账户额度、重置卡数量及到期时间、官方日用量。 | 读取 Claude Code 中的 DeepSeek API 配置，显示官方余额和本机今日 token。 | Astra、Sol、Terra、Luna，按推理档位对照社区评测。 |
+| 官方额度、重置卡、日用量；本机月度费用与主 / 子 Agent 明细。 | 读取 Claude Code 中的 DeepSeek API 配置，显示官方余额和本机今日 token。 | Astra、Sol、Terra、Luna，按推理档位对照社区评测。 |
 
 ### 日常使用，保持轻巧
 
@@ -37,6 +41,8 @@
 - **低额度通知**，默认开启：Codex 剩余 ≤10%，DeepSeek 余额 ≤¥10 / $1；在「设置 / 说明」关闭。
 - **缓存命中率**，面板与明细都显示，按缓存命中 token ÷ 全部输入 token 计算，保留一位小数；当天无输入或记录不完整时显示 `—`。
 - **今日用量明细**，分别显示 Codex 与 Claude Code 中 DeepSeek 的输入、输出和缓存命中。
+- **月度费用与 Agent 用量**：按自定续费日统计本周期，展开任务查看主 / 子 Agent、实际模型与推理档位；查看模型排行、每日趋势、近 60 分钟速度和月度折算预算。
+- **周期结束预测**：按本周期平均速度外推；费用不全时显示已知部分和 `+ ?`，未定价 Token 单独列出。表格支持搜索、筛选及 CSV / JSON 导出。
 - **重置卡一眼可见**，显示官方可用数量、最近到期日，点击「明细」查看已返回的到期时间。
 - **关闭即隐藏到托盘**，支持面板置顶。
 - **旧数据明确标记**，查询失败不会伪装成新结果。
@@ -76,6 +82,29 @@ py -3.12 -m venv .venv
 | 单击绿色托盘图标 | 重新显示面板 |
 | 右键托盘图标 | 刷新或退出 |
 | 勾选「置顶」 | 面板保持在其他窗口上方 |
+
+## 月度费用与 Agent 用量
+
+打开「用量与费用」，在「续费锚点」填写自己的续费日期（`YYYY-MM-DD`）并保存。程序沿用该日期的日号，按本地时区统计每月周期：从起始日零点开始，到下月同日零点结束，结束日不计入。月底不足原日号时使用当月最后一天，下个月恢复原日号。这里不使用 5 小时或每周额度的重置时间推测订阅日期。
+
+| 视图 | 显示内容 |
+| :--- | :--- |
+| 本周期概览 | 已记录 Token 折算金额、周期结束预测、主 / 子 Agent Token、最近 60 分钟消耗速度。 |
+| 任务 / Agent | 任务合计与可展开的 Agent 明细；同一个 Agent 切换模型或推理档位时分行显示实际用量。 |
+| 模型排行 | 按模型及推理档位汇总输入、缓存输入、输出、Token 占比与折算金额。 |
+| 每日趋势与明细 | 本周期本机每日记录；图中金额只含已定价部分，未定价 Token 在明细中保留。 |
+| 预算与导出 | 可选的月度美元折算预算；导出当前标签页和当前筛选结果为 CSV 或 JSON。 |
+
+任务合计已经包含子 Agent，不能再和展开的明细相加。角色或模型无法辨认时保留为未知；标题仅来自本机会话索引，不从聊天正文提取。表格可按任务 / Agent 搜索，并按模型、角色和时间范围筛选；筛选不改变上方周期概览。今日、最近 7 天的筛选也只覆盖当前载入的月度周期。
+
+**费用是 Standard API 基础 Token 折算，不是 ChatGPT / Codex 订阅实际账单。** 当前费率核验于 **2026-09-26**，历史记录也按这套费率重算；来源为 [OpenAI API 定价](https://developers.openai.com/api/docs/pricing)及各模型页。ChatGPT credits、订阅已含额度和 API 收费口径不同，不能把额度消耗百分比当成美元费用比例。相关说明见 [Codex 定价](https://learn.chatgpt.com/docs/pricing)与 [Speed](https://learn.chatgpt.com/docs/agent-configuration/speed)。
+
+- 缓存读取属于输入，推理 Token 属于输出，不重复加总；`ultra` 等推理档位按日志展示，不额外乘虚构的单价系数。
+- 按单次请求输入判断适用的长上下文价格。模型、缓存计数、单次输入或计价条件无法确认时保留 Token 为未定价，不补成零费用。
+- 不计无法确认的 Fast 等服务档位差价、缓存写入溢价和工具 / 图像等费用。只统计本机留存日志，可能缺少其他设备、云任务及已删除记录。
+- **预计费用 = 本周期已记录折算 ÷ 已过时间 × 完整周期时长**，按实际日历月计算。未满 24 小时、没有可定价用量或读取不完整时不预测；有未定价 Token 时仅显示“已知部分预计”并加 `+ ?`。未来使用节奏变化会改变结果。
+- 近 60 分钟速度按最近一小时的已记录用量计算；预算用于对照折算金额，不会限制调用、自动充值或改变订阅。
+- CSV / JSON 包含当前筛选的汇总明细、任务名称及标识，不含聊天正文；导出文件由用户选择保存位置。
 
 <a id="build"></a>
 
@@ -118,9 +147,9 @@ py -3.12 -m venv .venv
 - Codex：读取 `CODEX_HOME` 下 `sessions/` 与 `archived_sessions/` 的 token 事件，按累计值差额统计并去重。
 - DeepSeek：读取 Claude Code 项目日志中 DeepSeek 模型的用量，按消息 ID 去重；其他 API 客户端的调用不在此范围。
 - token 统一以 m（百万）显示，保留三位小数；不足 0.001m 的非零值显示 <0.001m。输入包含缓存读取和创建；缓存命中是输入的子集，不能再加一次。推理 token 已包含在输出中。
-- 启动时补读最近 7 天保留的日志，之后增量读取；跨午夜重新按本地日期统计。日志缺失或已清理可能导致统计不完整。
+- 今日计数启动时补读最近 7 天保留的日志，之后增量读取；跨午夜重新按本地日期统计。月度分析另按配置周期读取并去重单次响应和旧版累计事件，避免重复计算同一次请求或子 Agent 继承的历史。日志缺失或已清理可能导致统计不完整。
 - 未找到日志目录显示 `—`；存在目录但当天没有可统计调用显示 `0`。
-- 不读取对话正文用于展示，不上传本地用量，不将 token 换算成未经核实的费用。
+- 不读取对话正文用于展示，不上传本地用量。月度分析只用已核验的官方单价折算可辨识 Token，明确区分已知金额、未定价部分和实际账单。
 
 ### 低额度提醒怎么触发？
 
@@ -134,7 +163,7 @@ py -3.12 -m venv .venv
 
 - DeepSeek 密钥只发送到官方 `api.deepseek.com/user/balance`，不会发送给 Codex Radar。
 - 本工具不持久化 API 密钥，也不修改 Claude Code 的服务配置。
-- 额度、余额、评分缓存和窗口设置存放于本机 `data/`，已从 Git 排除。
+- 额度、余额、评分缓存和窗口设置，以及续费锚点和可选折算预算存放于本机 `data/`，已从 Git 排除。
 - 公开仓库不包含个人用量、余额截图或运行缓存。
 
 <details>
@@ -156,7 +185,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s source -p "test*.py"
 ```
 
-测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法、密钥发送目标，以及增量 token 统计、7 天历史、缓存口径、去重、跨日行为、低额度提醒、官方日期保留与数据来源选择。
+测试无需真实账户或网络请求，覆盖额度窗口、缺失数据、百分比处理、雷达加权算法、密钥发送目标，以及增量 token 统计、7 天历史、缓存口径、去重、跨日行为、低额度提醒、官方日期保留与数据来源选择。月度分析测试覆盖周期边界、月底与闰年、主 / 子 Agent 归属、模型变更、未知计数、长上下文和预测可用条件。
 
 安装运行依赖后，可在 Windows 桌面运行界面回归。它们使用模拟数据，检查原生下拉菜单切换、弹窗关闭和后台读取途中退出：
 
@@ -171,6 +200,11 @@ usage-panel/
 │   ├── app.py               # 托盘与面板
 │   ├── providers.py         # 额度、余额、评分适配器
 │   ├── token_usage.py      # 本机今日及 7 天 token 统计
+│   ├── usage_analytics.py  # 本周期响应去重、模型与主 / 子 Agent 归属
+│   ├── usage_costs.py      # 月度周期、基础费用折算、每日汇总与预测
+│   ├── insights_ui.py      # 月度分析窗口、筛选、预算与 CSV / JSON 导出
+│   ├── test_usage_analytics.py # 本周期读取与归属测试
+│   ├── test_usage_costs.py # 费用、月度周期与预测测试
 │   ├── usage_view.py       # 官方优先、缓存及今日暂估规则
 │   ├── test_usage_view.py  # 来源选择与未知值测试
 │   ├── alerts.py           # 低额度提醒与去重
@@ -190,11 +224,16 @@ usage-panel/
 | 来源 | 读取内容 |
 | :--- | :--- |
 | [Codex App Server](https://learn.chatgpt.com/docs/app-server) | `account/rateLimits/read` 额度与重置卡；`account/usage/read` 官方日统计 |
-| 本机 Codex / Claude Code 日志 | 当天保留的调用用量，不等同于全账户统计 |
+| 本机 Codex / Claude Code 日志 | 留存的调用用量；Codex 月度分析使用响应与会话元数据，不等同于全账户统计 |
+| [OpenAI API 定价](https://developers.openai.com/api/docs/pricing) | Standard API 基础 Token 折算费率，核验日期 2026-09-26 |
 | [DeepSeek API](https://api-docs.deepseek.com/zh-cn/api/get-user-balance/) | 账户余额，非当天消费统计 |
 | [Codex Radar](https://codexradar.com/) | 公开模型评测数据，网站改版时可能需要更新适配器 |
 
 系统进程数不等于活动 AI 任务数。更多操作细节见 [使用说明](使用说明.md)。
+
+## 交互参考
+
+月度报表、消耗速度和任务明细的交互参考了 [ccusage](https://github.com/ccusage/ccusage)、[CodexBar](https://github.com/steipete/CodexBar)、[Claude Code Usage Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) 和 [codex-usage](https://github.com/zJay26/codex-usage)。本项目自行实现本机读取、费用计算与 Windows 界面，未复制这些项目的代码，也不依赖它们运行。
 
 ---
 

@@ -18,20 +18,25 @@ from providers import collect, read_json
 from token_usage import DailyTokens
 from alerts import check_alerts
 from usage_view import codex_daily_rows, retain_daily_usage
+from usage_analytics import UsageAnalytics
+from usage_costs import monthly_cycle, build_report, enrich_pricing_events
+from insights_ui import InsightsWindow, cost_text, money
 
 BASE = pathlib.Path(sys.executable).parent if getattr(sys, 'frozen', False) else pathlib.Path(__file__).resolve().parent.parent
 DATA = BASE/'data'
-BG = '#EDF0EA'
-FG = '#26332C'
-MUTED = '#7A877E'
-LINE = '#D4DCD2'
-GREEN = '#28B753'
+BG = '#F1F3EE'
+FG = '#17362C'
+MUTED = '#60736A'
+LINE = '#D5DFD2'
+GREEN = '#238C52'
 FONT = 'Microsoft YaHei UI'
 MONO = 'Consolas'
 LEVELS = ['ultra', 'max', 'xhigh', 'high', 'medium', 'low']
 DEFAULT_SCORES = {name: ['']*6 for name in ['Astra','Sol','Terra','Luna']}
 
 def token_text(value):
+    if value is None:
+        return '—'
     return '<0.001m' if 0 < value < 1000 else f'{value/1_000_000:.3f}m'
 
 def cache_hit_text(data):
@@ -112,7 +117,14 @@ class UsagePanel:
         self.closed = False
         self.layout_after = None
         self.token_reader = DailyTokens()
+        self.analytics_reader = UsageAnalytics()
+        self.analytics_snapshot = {}
+        self.analytics_report = {}
+        self.insights_window = None
+        self.cost_label = None
+        self.cost_note = None
         self.token_busy = False
+        self.token_after_id = None
         self.tokens = {}
         self.token_labels = {}
         self.result = read_json(DATA/'usage-cache.json')
@@ -172,13 +184,18 @@ class UsagePanel:
 
     def draw(self):
         self.token_labels = {}
+        self.cost_label = None
+        self.cost_note = None
         for child in self.body.winfo_children():
             child.destroy()
-        header = tk.Frame(self.body, bg=BG)
-        header.pack(fill='x')
-        self.label(header, 'USAGE PANEL', 13, bold=True, mono=True).pack(side='left')
-        self.label(header, '●  自动更新', 9, GREEN).pack(side='right')
-        self.label(self.body, 'AI 用量，一眼看清', 9, MUTED).pack(anchor='w', pady=(3, 2))
+        header = tk.Frame(self.body, bg='#163B2E', padx=12, pady=10)
+        header.pack(fill='x', pady=(0,6))
+        brand = self.label(header, 'USAGE PANEL', 14, '#FFFFFF', bold=True, mono=True)
+        brand.configure(bg='#163B2E')
+        brand.pack(side='left')
+        live = self.label(header, '●  自动更新', 9, '#A8ECC4')
+        live.configure(bg='#163B2E')
+        live.pack(side='right')
         self.line()
         tooltip = []
         for key, fallback in [('codex','Codex')]:
@@ -231,6 +248,17 @@ class UsagePanel:
                 text += '（旧数据）' if count is not None else ''
             self.label(self.body, text, 9, MUTED).pack(anchor='w', pady=(0, 3))
             self.token_row('codex')
+            cost_row = tk.Frame(self.body, bg='#E0EDDF', padx=8, pady=3)
+            cost_row.pack(fill='x', pady=(5,0))
+            self.cost_label = self.label(cost_row, '', 10, GREEN)
+            self.cost_label.configure(bg='#E0EDDF')
+            self.cost_label.pack(side='left')
+            cost_button = self.button(cost_row, '费用 / Agent ↗', self.show_insights)
+            cost_button.configure(bg='#E0EDDF')
+            cost_button.pack(side='right')
+            self.cost_note = self.label(self.body, '', 8, MUTED, wraplength=490, justify='left')
+            self.cost_note.pack(anchor='w')
+            self.update_cost_labels()
             self.line()
         deep=self.result.get('deepseek',{})
         head=tk.Frame(self.body,bg=BG)
@@ -391,9 +419,20 @@ class UsagePanel:
                     self.draw()
                 elif kind=='tokens':
                     self.tokens=value
-                    self.token_busy=False
                     self.update_token_labels()
-                    self.root.after(10000, self.refresh_tokens)
+                elif kind=='analytics':
+                    anchor, snapshot, report = value
+                    self.token_busy=False
+                    if anchor == self.settings.get('billing_anchor'):
+                        self.analytics_snapshot = snapshot
+                        self.analytics_report = report
+                        self.update_cost_labels()
+                        if getattr(self.args, 'insights', False) and not getattr(self, '_insights_opened', False):
+                            self._insights_opened = True
+                            self.show_insights()
+                    if self.token_after_id is not None:
+                        self.root.after_cancel(self.token_after_id)
+                    self.token_after_id = self.root.after(10000 if anchor == self.settings.get('billing_anchor') else 1, self.refresh_tokens)
                 elif kind=='show': self.show()
                 elif kind=='refresh': self.refresh()
                 elif kind=='quit': self.quit(); return
@@ -452,16 +491,69 @@ class UsagePanel:
     def refresh_tokens(self):
         if self.closed or self.token_busy:
             return
+        if self.token_after_id is not None:
+            self.root.after_cancel(self.token_after_id)
+            self.token_after_id = None
         self.token_busy = True
         reader, messages = self.token_reader, self.messages
+        analytics_reader = self.analytics_reader
+        anchor = self.settings.get('billing_anchor')
         def worker():
             try:
                 result = reader.read()
             except Exception:
                 result = {'date': dt.datetime.now().date().isoformat(),
                           'codex': {'available': False}, 'deepseek': {'available': False}}
+            try:
+                now = dt.datetime.now().astimezone()
+                since, _ = monthly_cycle(anchor, now)
+                week = (now-dt.timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+                snapshot = enrich_pricing_events(analytics_reader.read(now=now, since=min(since, week) if since else week))
+                report = build_report(snapshot, anchor, now)
+                if snapshot.get('available'):
+                    today = [e for e in snapshot['events'] if dt.datetime.fromtimestamp(e['timestamp']).date() == now.date()]
+                    inputs = sum(e['input'] for e in today)
+                    cached = None if any(e.get('cached') is None for e in today) else sum(e['cached'] for e in today)
+                    daily = {'input': inputs, 'cached': cached,
+                        'output': sum(e['output'] for e in today), 'total': sum(e['total'] for e in today),
+                        'available': True, 'partial': bool(snapshot.get('partial')), 'ok': not snapshot.get('partial')}
+                    result['codex'] = daily
+                    if result.get('history'):
+                        result['history'][-1]['codex'] = dict(daily)
+            except Exception:
+                snapshot = {'available': False, 'partial': True, 'events': [], 'sessions': {}, 'updated': time.time()}
+                report = {}
             messages.put(('tokens', result))
+            messages.put(('analytics', (anchor, snapshot, report)))
         threading.Thread(target=worker, daemon=True).start()
+
+    def update_cost_labels(self):
+        if self.cost_label is None:
+            return
+        report = self.analytics_report
+        if not self.settings.get('billing_anchor'):
+            self.cost_label.configure(text='月度费用  —  设置续费日期')
+            self.cost_note.configure(text='按订阅续费日统计月度周期 · API 单价折算，非实付账单')
+            return
+        if not report.get('start') or not self.analytics_snapshot.get('available'):
+            self.cost_label.configure(text='月度费用  —  正在读取 / 暂不可用')
+            self.cost_note.configure(text='本机 Token 折算 · 不含其他设备及未保留日志')
+            return
+        forecast = report.get('projected_cost')
+        partial = forecast is None and report.get('projected_known_cost') is not None
+        if partial:
+            forecast = report['projected_known_cost']
+        self.cost_label.configure(text=f'周期折算 {cost_text(report)}  ·  预计 {money(forecast)}'+(' + ?' if partial else ''))
+        self.cost_note.configure(text=f'{report["start"]} → {report["end"]} · API 折算非实付'+
+            (' · ? 为未定价用量' if report.get('unpriced_tokens') else '')+
+            (' · 读取不完整' if report.get('partial') else ''))
+
+    def show_insights(self):
+        if self.insights_window is not None and self.insights_window.window.winfo_exists():
+            self.insights_window.window.lift()
+        else:
+            self.insights_window = InsightsWindow(self)
+        return self.insights_window.window
 
     def usage_details(self):
         dialog = tk.Toplevel(self.root)
@@ -618,8 +710,9 @@ class UsagePanel:
     def save_settings(self):
         DATA.mkdir(exist_ok=True)
         target=DATA/'settings.tmp'
-        target.write_text(json.dumps({'radar_mode':self.radar_mode.get(), 'topmost':self.topmost.get(),
-            'alerts_enabled':self.alerts_enabled.get()},ensure_ascii=False,indent=2),encoding='utf-8')
+        self.settings.update(radar_mode=self.radar_mode.get(), topmost=self.topmost.get(),
+                             alerts_enabled=self.alerts_enabled.get())
+        target.write_text(json.dumps(self.settings,ensure_ascii=False,indent=2),encoding='utf-8')
         target.replace(DATA/'settings.json')
 
     def toggle_topmost(self):
@@ -683,7 +776,7 @@ class UsagePanel:
         # Fast provider failures can finish before the first local log scan.
         # Wait for that scan before accepting a successful packaged smoke run;
         # the existing 55-second failure deadline still bounds the wait.
-        if success and self.token_busy and not self.tokens.get('updated'):
+        if success and self.token_busy and not self.analytics_snapshot.get('updated'):
             self.root.after(500, lambda: self.finish_smoke(success))
             return
         if self.args.trend_screenshot and not getattr(self, '_smoke_trend_captured', False):
@@ -706,6 +799,10 @@ class UsagePanel:
             box=(self.root.winfo_rootx(),self.root.winfo_rooty(),self.root.winfo_rootx()+self.root.winfo_width(),self.root.winfo_rooty()+self.root.winfo_height())
             ImageGrab.grab(bbox=box).save(self.args.screenshot)
         if self.args.report:
+            insights = self.show_insights()
+            insights.update()
+            insights_ok = insights.winfo_exists() and bool(self.insights_window.tasks.get_children())
+            insights.destroy()
             details = self.usage_details()
             details.update()
             details_ok = details.winfo_exists() and details.winfo_height() > 100
@@ -724,6 +821,10 @@ class UsagePanel:
                 'deepseek_ok':self.result.get('deepseek',{}).get('ok'),'radar_ok':self.result.get('radar',{}).get('ok'),'tray_visible':self.tray.visible,
                 'hide_show_ok':hidden_ok and shown_ok,'score_switch_ok':switched_ok,
                 'tokens_loaded': bool(self.tokens.get('updated')), 'reset_credits_loaded': self.result.get('codex', {}).get('reset_credits', {}).get('count') is not None,
+                'analytics_loaded': bool(self.analytics_snapshot.get('updated')),
+                'analytics_status': self.analytics_report.get('status'),
+                'analytics_tasks': len(self.analytics_report.get('tasks', [])),
+                'analytics_dialog_ok': bool(insights_ok),
                 'details_ok': bool(details_ok),
                 'history_days': len(self.tokens.get('history', [])),
                 'official_daily_ok': (self.result.get('codex', {}).get('daily_usage') or {}).get('ok'),
@@ -738,6 +839,7 @@ def main():
     except Exception: pass
     parser=argparse.ArgumentParser()
     parser.add_argument('--hidden',action='store_true')
+    parser.add_argument('--insights',action='store_true', help='Open the monthly analytics window after reading local records')
     parser.add_argument('--smoke',action='store_true')
     parser.add_argument('--screenshot')
     parser.add_argument('--trend-screenshot')

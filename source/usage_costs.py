@@ -8,10 +8,13 @@ import datetime as dt
 import math
 
 
-PRICING_VERIFIED = '2026-09-26'
+PRICING_VERIFIED = '2026-09-29'
 PRICING_URL = 'https://developers.openai.com/api/docs/pricing'
 # USD / million tokens: ordinary input, cached input, output.
+# GPT-6.1 Sol Standard API: https://openai.com/index/introducing-gpt-6-1-sol/
+# Ultrafast pricing and subscription allowances are not Standard API rates.
 RATES = {
+    'gpt-6.1-sol': (2.0, 0.1, 10.0),
     'gpt-6-astra': (10.0, 1.0, 50.0),
     'gpt-6-sol': (2.0, 0.2, 10.0),
     'gpt-6-luna': (0.1, 0.01, 0.5),
@@ -25,7 +28,7 @@ ALIASES = {'gpt-5.6': 'gpt-5.6-sol', 'gpt-5.5-2026-04-23': 'gpt-5.5'}
 LONG_CONTEXT_INPUT = 272_000
 SCOPE_NOTE = '仅统计本机留存日志；不代表其他设备、云端或账户全部用量。'
 VALUATION_NOTE = ('按当前官方 Standard API 基础 Token 单价折算，非订阅实际账单；'
-                  '未计 Fast 等服务档位差价、缓存写入溢价、工具及其他媒体费用。')
+                  '未计 Fast、Ultrafast 等服务档位差价、缓存写入溢价、工具及其他媒体费用。')
 _COUNTERS = ('total', 'input', 'cached', 'output')
 
 

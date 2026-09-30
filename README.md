@@ -97,7 +97,7 @@ py -3.12 -m venv .venv
 
 任务合计已经包含子 Agent，不能再和展开的明细相加。角色或模型无法辨认时保留为未知；标题仅来自本机会话索引，不从聊天正文提取。表格可按任务 / Agent 搜索，并按模型、角色和时间范围筛选；筛选不改变上方周期概览。今日、最近 7 天的筛选也只覆盖当前载入的月度周期。
 
-**费用是 Standard API 基础 Token 折算，不是 ChatGPT / Codex 订阅实际账单。** 当前费率核验于 **2026-09-26**，历史记录也按这套费率重算；来源为 [OpenAI API 定价](https://developers.openai.com/api/docs/pricing)及各模型页。ChatGPT credits、订阅已含额度和 API 收费口径不同，不能把额度消耗百分比当成美元费用比例。相关说明见 [Codex 定价](https://learn.chatgpt.com/docs/pricing)与 [Speed](https://learn.chatgpt.com/docs/agent-configuration/speed)。
+**费用是 Standard API 基础 Token 折算，不是 ChatGPT / Codex 订阅实际账单。** 当前费率核验日期更新至 **2026-09-29**，新增 [GPT-6.1 Sol 官方公告](https://openai.com/index/introducing-gpt-6-1-sol/)确认的 `gpt-6.1-sol`：每百万 Token 输入 $2、缓存输入 $0.10、输出 $10；其他模型费率保持原值。历史记录也按这套费率重算；来源为 [OpenAI API 定价](https://developers.openai.com/api/docs/pricing)及各模型页。即将推出的 Ultrafast 价格不纳入 Standard API 费率。ChatGPT credits、订阅已含额度和 API 收费口径不同，不能把额度消耗百分比当成美元费用比例。相关说明见 [Codex 定价](https://learn.chatgpt.com/docs/pricing)与 [Speed](https://learn.chatgpt.com/docs/agent-configuration/speed)。
 
 - 缓存读取属于输入，推理 Token 属于输出，不重复加总；`ultra` 等推理档位按日志展示，不额外乘虚构的单价系数。
 - 按单次请求输入判断适用的长上下文价格。模型、缓存计数、单次输入或计价条件无法确认时保留 Token 为未定价，不补成零费用。
@@ -225,7 +225,7 @@ usage-panel/
 | :--- | :--- |
 | [Codex App Server](https://learn.chatgpt.com/docs/app-server) | `account/rateLimits/read` 额度与重置卡；`account/usage/read` 官方日统计 |
 | 本机 Codex / Claude Code 日志 | 留存的调用用量；Codex 月度分析使用响应与会话元数据，不等同于全账户统计 |
-| [OpenAI API 定价](https://developers.openai.com/api/docs/pricing) | Standard API 基础 Token 折算费率，核验日期 2026-09-26 |
+| [OpenAI API 定价](https://developers.openai.com/api/docs/pricing)、[GPT-6.1 Sol 官方公告](https://openai.com/index/introducing-gpt-6-1-sol/) | Standard API 基础 Token 折算费率，核验日期更新至 2026-09-29；GPT-6.1 Sol 输入/缓存输入/输出为 $2/$0.10/$10 每百万 Token |
 | [DeepSeek API](https://api-docs.deepseek.com/zh-cn/api/get-user-balance/) | 账户余额，非当天消费统计 |
 | [Codex Radar](https://codexradar.com/) | 公开模型评测数据，网站改版时可能需要更新适配器 |
 

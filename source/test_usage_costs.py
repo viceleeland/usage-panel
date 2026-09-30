@@ -62,13 +62,27 @@ class CycleTests(unittest.TestCase):
 
 
 class EventCostTests(unittest.TestCase):
+    def test_gpt61_sol_standard_token_components(self):
+        for fields, expected in (
+                ({'input': 100_000, 'cached': 0, 'output': 0, 'total': 100_000}, .20),
+                ({'input': 100_000, 'cached': 100_000, 'output': 0, 'total': 100_000}, .01),
+                ({'input': 0, 'cached': 0, 'output': 100_000, 'total': 100_000}, 1.00)):
+            with self.subTest(fields=fields):
+                self.assertAlmostEqual(event_cost(event(model='gpt-6.1-sol', **fields)), expected)
+
+    def test_gpt61_sol_mixed_usage_subtracts_cached_input(self):
+        # 40K ordinary * $2 + 60K cache * $0.10 + 20K output * $10.
+        self.assertAlmostEqual(event_cost(event(model='gpt-6.1-sol')), .286)
+        self.assertAlmostEqual(event_cost(event(model='gpt-6-sol')), .292)
+
     def test_cached_input_and_reasoning_are_not_counted_twice(self):
         # 40K ordinary * $10 + 60K cache * $1 + 20K output * $50.
         self.assertAlmostEqual(event_cost(event()), 1.46)
         self.assertEqual(event_cost(event(reasoning=19_999, effort='low')), event_cost(event()))
 
     def test_unknown_models_and_unconfirmed_snapshot_are_unpriced(self):
-        for model in (None, 'gpt-6-astra-2099-01-01', 'gpt-6-astra-ultra', 'other'):
+        for model in (None, 'gpt-6-astra-2099-01-01', 'gpt-6-astra-ultra', 'other',
+                      'gpt-6.1-sol-2099-01-01', 'gpt-6.1-sol-ultrafast'):
             with self.subTest(model=model):
                 self.assertIsNone(event_cost(event(model=model)))
         self.assertEqual(event_cost(event(model='gpt-5.5-2026-04-23')),
@@ -85,7 +99,7 @@ class EventCostTests(unittest.TestCase):
         self.assertIsNone(event_cost(event(model='gpt-5.5', request_input=272_001)))
 
     def test_all_documented_model_rates(self):
-        expected = {'gpt-6-astra': 60, 'gpt-6-sol': 12, 'gpt-6-luna': 0.6,
+        expected = {'gpt-6.1-sol': 12, 'gpt-6-astra': 60, 'gpt-6-sol': 12, 'gpt-6-luna': 0.6,
                     'gpt-5.6-sol': 24, 'gpt-5.6-terra': 14,
                     'gpt-5.6-luna': 1.4, 'gpt-5.5': 35}
         for model, cost in expected.items():

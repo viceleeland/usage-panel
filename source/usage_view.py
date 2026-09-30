@@ -1,5 +1,21 @@
 """Choose official Codex daily totals without mixing in local history."""
 import datetime as dt
+import math
+
+
+def analytics_partial_today(snapshot, now):
+    """Scope timestamped read issues to today; unknown-time issues stay global."""
+    issues = snapshot.get('issues')
+    if not isinstance(issues, list):
+        return bool(snapshot.get('partial'))
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    until = now.timestamp()
+    for issue in issues:
+        stamp = issue.get('timestamp') if isinstance(issue, dict) else None
+        if (not isinstance(stamp, (int, float)) or isinstance(stamp, bool)
+                or not math.isfinite(stamp) or start <= stamp <= until):
+            return True
+    return False
 
 
 def codex_daily_rows(official, local_snapshot, today_iso):

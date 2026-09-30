@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw, ImageGrab, ImageTk
 from providers import collect, read_json
 from token_usage import DailyTokens
 from alerts import check_alerts
-from usage_view import codex_daily_rows, retain_daily_usage
+from usage_view import analytics_partial_today, codex_daily_rows, retain_daily_usage
 from usage_analytics import UsageAnalytics
 from usage_costs import monthly_cycle, build_report, enrich_pricing_events
 from insights_ui import InsightsWindow, cost_text, money
@@ -514,9 +514,10 @@ class UsagePanel:
                     today = [e for e in snapshot['events'] if dt.datetime.fromtimestamp(e['timestamp']).date() == now.date()]
                     inputs = sum(e['input'] for e in today)
                     cached = None if any(e.get('cached') is None for e in today) else sum(e['cached'] for e in today)
+                    partial = analytics_partial_today(snapshot, now)
                     daily = {'input': inputs, 'cached': cached,
                         'output': sum(e['output'] for e in today), 'total': sum(e['total'] for e in today),
-                        'available': True, 'partial': bool(snapshot.get('partial')), 'ok': not snapshot.get('partial')}
+                        'available': True, 'partial': partial, 'ok': not partial}
                     result['codex'] = daily
                     if result.get('history'):
                         result['history'][-1]['codex'] = dict(daily)

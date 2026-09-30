@@ -1,7 +1,35 @@
 import copy
+import datetime as dt
 import unittest
 
-from usage_view import codex_daily_rows, retain_daily_usage
+from usage_view import analytics_partial_today, codex_daily_rows, retain_daily_usage
+
+
+class TodayPartialTests(unittest.TestCase):
+    now = dt.datetime(2026, 9, 30, 12, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+
+    def test_yesterday_and_future_issues_do_not_hide_today_cache(self):
+        for when in (self.now-dt.timedelta(days=1), self.now+dt.timedelta(days=1)):
+            with self.subTest(when=when):
+                self.assertFalse(analytics_partial_today(
+                    {'partial': True, 'issues': [{'timestamp': when.timestamp()}]}, self.now))
+
+    def test_today_issue_including_midnight_stays_partial(self):
+        for when in (self.now, self.now.replace(hour=0)):
+            with self.subTest(when=when):
+                self.assertTrue(analytics_partial_today(
+                    {'issues': [{'timestamp': when.timestamp()}]}, self.now))
+
+    def test_unknown_time_issues_stay_partial(self):
+        for stamp in (None, float('nan'), float('inf'), True, 'unknown'):
+            with self.subTest(stamp=stamp):
+                self.assertTrue(analytics_partial_today(
+                    {'issues': [{'timestamp': stamp}]}, self.now))
+
+    def test_legacy_partial_and_complete_metadata(self):
+        self.assertTrue(analytics_partial_today({'partial': True}, self.now))
+        self.assertFalse(analytics_partial_today({'partial': False}, self.now))
+        self.assertFalse(analytics_partial_today({'partial': True, 'issues': []}, self.now))
 
 
 class DailyRowsTests(unittest.TestCase):

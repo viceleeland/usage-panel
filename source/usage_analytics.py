@@ -197,10 +197,21 @@ class UsageAnalytics:
         state['previous_cache_known'] = _cache_known(info.get('total_token_usage'))
         if inherited:
             return
-        if previous is not None and all(v >= p for v, p in zip(total, previous)):
-            values = tuple(v-p for v, p in zip(total, previous))
-            request_input = last[0] if last == values else None
-            cache_known = state['previous_cache_known'] and previous_cache_known
+        if previous is not None and all(total[i] >= previous[i] for i in (0, 2, 4)):
+            # Optional cache/reasoning subsets may disappear or move backwards
+            # independently. Only essential input/output/total counters establish
+            # a reset; otherwise reusing last would count a request twice.
+            values = tuple(max(0, v-p) for v, p in zip(total, previous))
+            # Reasoning is already in output; a cache disagreement still makes
+            # the per-request pricing context uncertain.
+            request_input = last[0] if last is not None and all(
+                last[i] == values[i] for i in (0, 1, 2, 4)) else None
+            cache_known = (state['previous_cache_known'] and previous_cache_known
+                           and total[1] >= previous[1])
+            if total[1] < previous[1] or (not values[-1] and not cache_known):
+                # Do not price a later recovery from this uncertain baseline,
+                # or let a repeated zero-usage notice certify it again.
+                state['previous_cache_known'] = False
         else:
             if last is None:
                 self._issue(state, stamp, '部分旧日志缺少可辨识的单次用量。', 'cumulative')

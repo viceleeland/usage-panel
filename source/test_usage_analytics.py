@@ -296,6 +296,79 @@ class UsageAnalyticsTests(unittest.TestCase):
         self.assertIsNone(events[0]['cached'])
         self.assertIsNone(events[1]['cached'])
 
+    def test_optional_counter_loss_or_regression_does_not_recount_last_request(self):
+        for field in ('cached_input_tokens', 'reasoning_output_tokens'):
+            for missing in (True, False):
+                with self.subTest(field=field, missing=missing):
+                    repeated = cumulative(stamp='2026-09-26T10:00:01Z')
+                    counters = repeated['payload']['info']['total_token_usage']
+                    if missing:
+                        del counters[field]
+                    else:
+                        counters[field] = 1
+                    self.write([meta(), context(), cumulative(), repeated])
+                    result = self.read()
+                    self.assertEqual([e['total'] for e in result['events']], [110])
+                    self.assertFalse(result['partial'])
+
+    def test_optional_counter_regression_preserves_essential_cumulative_delta(self):
+        second = cumulative(usage(300, 30, 20, 1), last=usage(50, 5, 10, 1),
+                            stamp='2026-09-26T10:01:00Z')
+        self.write([meta(), context(), cumulative(), second])
+        events = self.read()['events']
+        self.assertEqual([e['total'] for e in events], [110, 220])
+        self.assertIsNone(events[1]['cached'])
+        self.assertIsNone(events[1]['request_input'])
+
+    def test_missing_or_regressed_cache_recovery_stays_unpriced(self):
+        from usage_costs import event_cost
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                repeated = cumulative(stamp='2026-09-26T10:00:01Z')
+                counters = repeated['payload']['info']['total_token_usage']
+                if missing:
+                    del counters['cached_input_tokens']
+                else:
+                    counters['cached_input_tokens'] = 20
+                resumed = cumulative(usage(150, 15, 60, 5), last=usage(50, 5, 20, 2),
+                                     stamp='2026-09-26T10:01:00Z')
+                repeated_again = dict(repeated, timestamp='2026-09-26T10:00:02Z')
+                self.write([meta(), context(), cumulative(), repeated, repeated_again, resumed])
+                events = self.read()['events']
+                self.assertEqual([e['total'] for e in events], [110, 55])
+                self.assertIsNone(events[1]['cached'])
+                self.assertIsNone(events[1]['request_input'])
+                self.assertIsNone(event_cost(events[1]))
+
+    def test_conflicting_cumulative_and_last_cache_remains_unpriced(self):
+        from usage_costs import event_cost
+        self.write([meta(), context(), cumulative(),
+                    cumulative(usage(150, 15, 70, 5), last=usage(50, 5, 20, 2),
+                               stamp='2026-09-26T10:01:00Z')])
+        event = self.read()['events'][1]
+        self.assertEqual(event['total'], 55)
+        self.assertIsNone(event['request_input'])
+        self.assertIsNone(event_cost(event))
+
+    def test_reasoning_counter_loss_does_not_make_known_cache_cost_unknown(self):
+        from usage_costs import event_cost
+        resumed = cumulative(usage(150, 15, 60, 5), last=usage(50, 5, 20, 2),
+                             stamp='2026-09-26T10:01:00Z')
+        del resumed['payload']['info']['total_token_usage']['reasoning_output_tokens']
+        self.write([meta(), context(), cumulative(), resumed])
+        events = self.read()['events']
+        self.assertEqual([e['total'] for e in events], [110, 55])
+        self.assertEqual((events[1]['cached'], events[1]['request_input']), (20, 50))
+        self.assertIsNotNone(event_cost(events[1]))
+
+    def test_essential_counter_reset_still_uses_last_usage(self):
+        self.write([meta(), context(), cumulative(usage(1000, 100, 400, 30)),
+                    cumulative(usage(50, 5, 20, 2), last=usage(50, 5, 20, 2),
+                               stamp='2026-09-26T10:01:00Z'),
+                    cumulative(usage(100, 10, 40, 4), last=usage(50, 5, 20, 2),
+                               stamp='2026-09-26T10:02:00Z')])
+        self.assertEqual([e['total'] for e in self.read()['events']], [1100, 55, 55])
+
     def test_copied_legacy_fork_counters_are_not_charged_to_parent_and_child(self):
         older = cumulative(stamp='2026-09-26T08:00:00Z')
         self.write([meta(), context(), older])

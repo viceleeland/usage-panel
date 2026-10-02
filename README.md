@@ -238,6 +238,17 @@ usage-panel/
 
 系统进程数不等于活动 AI 任务数。更多操作细节见 [使用说明](使用说明.md)。
 
+### 对照已经结束的日期
+
+用 `UsagePanel.exe --reconcile` 启动可生成 `data/usage-reconciliation.json`。
+它只使用面板已经采集的计量快照，按系统本地日界和 UTC 日界分别汇总最近七个已结束日期，
+并保留官方接口原始日期与总量，便于分离时区造成的差额。该文件不含会话标识、任务名称、
+模型名称、文件路径或对话内容，也不增加日志扫描。
+
+UTC 是诊断对照口径，不据此推断官方后台分桶规则；缺失记录、未知缓存和未结束的日桶保留状态。
+官方查询时间仅代表读取时刻，不代表数据统计截止时间；已结束日期也不等于服务端承诺不再回填。
+Codex CLI 账户日统计与 ChatGPT 新版个人资料页目前使用不同接口，不能假定两者同时更新。
+
 ## 交互参考
 
 月度报表、消耗速度和任务明细的交互参考了 [ccusage](https://github.com/ccusage/ccusage)、[CodexBar](https://github.com/steipete/CodexBar)、[Claude Code Usage Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) 和 [codex-usage](https://github.com/zJay26/codex-usage)。本项目自行实现本机读取、费用计算与 Windows 界面，未复制这些项目的代码，也不依赖它们运行。

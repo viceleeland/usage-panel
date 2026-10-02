@@ -21,6 +21,7 @@ from usage_view import (analytics_partial_today, codex_daily_rows, latest_offici
                         official_range_rows, official_usage_for_date, retain_daily_usage)
 from usage_analytics import UsageAnalytics
 from usage_costs import monthly_cycle, build_report, enrich_pricing_events
+from usage_reconciliation import build_reconciliation
 from insights_ui import InsightsWindow, cost_text, money
 
 BASE = pathlib.Path(sys.executable).parent if getattr(sys, 'frozen', False) else pathlib.Path(__file__).resolve().parent.parent
@@ -405,6 +406,8 @@ class UsagePanel:
                     self.result=value
                     self.busy=False
                     self.save_cache()
+                    if getattr(self.args, 'reconcile', False):
+                        self.save_reconciliation()
                     if not self.args.smoke:
                         self.process_alerts()
                     self.draw()
@@ -424,6 +427,8 @@ class UsagePanel:
                     if anchor == self.settings.get('billing_anchor'):
                         self.analytics_snapshot = snapshot
                         self.analytics_report = report
+                        if getattr(self.args, 'reconcile', False):
+                            self.save_reconciliation()
                         self.update_cost_labels()
                         if getattr(self.args, 'insights', False) and not getattr(self, '_insights_opened', False):
                             self._insights_opened = True
@@ -446,6 +451,22 @@ class UsagePanel:
             target.write_text(json.dumps(self.result,ensure_ascii=False,indent=2),encoding='utf-8')
             target.replace(DATA/'usage-cache.json')
         except OSError:
+            pass
+
+    def save_reconciliation(self):
+        """Write aggregate-only diagnostics from the already collected snapshot."""
+        snapshot = self.analytics_snapshot
+        if not snapshot.get('updated'):
+            return
+        try:
+            official = (self.result.get('codex') or {}).get('daily_usage') or {}
+            report = build_reconciliation(snapshot, official)
+            DATA.mkdir(exist_ok=True)
+            target = DATA/'usage-reconciliation.tmp'
+            target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+            target.replace(DATA/'usage-reconciliation.json')
+        except Exception:
+            # Optional diagnostics must never interrupt the panel's polling loop.
             pass
 
     def token_row(self, kind):
@@ -890,6 +911,7 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--hidden',action='store_true')
     parser.add_argument('--insights',action='store_true', help='Open the monthly analytics window after reading local records')
+    parser.add_argument('--reconcile',action='store_true', help='Write aggregate-only UTC and local daily comparison to data/usage-reconciliation.json')
     parser.add_argument('--smoke',action='store_true')
     parser.add_argument('--screenshot')
     parser.add_argument('--trend-screenshot')

@@ -14,7 +14,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from token_usage import DailyTokens
 from usage_analytics import UsageAnalytics
@@ -29,7 +29,7 @@ TODAY = NOW.date().isoformat()
 class FixedDateTime(dt.datetime):
     @classmethod
     def now(cls, tz=None):
-        return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+        return NOW.astimezone(tz) if tz is not None else dt.datetime.fromtimestamp(NOW.timestamp())
 
 
 class ImmediateThread:
@@ -122,6 +122,9 @@ class AppUsageTests(unittest.TestCase):
                 primary, _ = self.labels()
                 self.assertIn(f'官方 {date}  9.000m', primary)
                 self.assertNotIn('今日', primary)
+                row = next(row for row in self.panel.codex_rows() if row['date'] == date)
+                self.assertEqual(row['source'], 'official')
+                self.assertEqual(row['total'], 9_000_000)
 
     def test_missing_official_value_never_promotes_local_to_official(self):
         for daily in ({'ok': True, 'buckets': []}, {'ok': False, 'buckets': []}):
@@ -187,7 +190,8 @@ class AppUsageWorkerTests(unittest.TestCase):
         self.panel.token_after_id = None
         self.panel.settings = {'billing_anchor': '2026-09-21'}
         self.panel.messages = queue.Queue()
-        self.panel.token_reader = SimpleNamespace(read=lambda: reader.read(now=NOW))
+        self.panel.token_reader = SimpleNamespace(
+            read=lambda: reader.read(now=dt.datetime.fromtimestamp(NOW.timestamp())))
         self.panel.analytics_reader = UsageAnalytics(self.home)
 
     def write(self, records):
@@ -245,6 +249,53 @@ class AppUsageWorkerTests(unittest.TestCase):
         self.assertTrue(result['codex']['partial'])
         self.assertFalse(result['codex']['ok'])
         self.assertTrue(any(issue['timestamp'] is None for issue in snapshot['issues']))
+
+    @unittest.skipUnless(hasattr(time, 'tzset'), 'requires system timezone switching')
+    def test_worker_partial_uses_actual_midnight_across_dst_and_repeated_hour(self):
+        cases = [('2026-03-08T19:00:00+00:00', '2026-03-08T07:30:00Z', False),
+                 ('2026-11-01T20:00:00+00:00', '2026-11-01T07:30:00Z', True),
+                 # The second 01:30 must not become the first 01:30: the
+                 # intervening 01:45 PDT issue has already happened.
+                 ('2026-11-01T09:30:00+00:00', '2026-11-01T08:45:00Z', True)]
+        try:
+            with patch.dict(os.environ, {'TZ': 'America/Los_Angeles'}):
+                time.tzset()
+                for now, stamp, expected in cases:
+                    with self.subTest(now=now), patch(__name__+'.NOW', dt.datetime.fromisoformat(now)):
+                        self.panel.token_busy = False
+                        self.panel.messages = queue.Queue()
+                        self.panel.analytics_reader = UsageAnalytics(self.home)
+                        records = self.records(stamp)
+                        records[-1]['payload']['response_id'] = None
+                        self.write(records)
+                        result, snapshot = self.run_worker()
+                        self.assertTrue(snapshot['partial'])
+                        self.assertEqual(result['codex']['partial'], expected)
+                        self.assertEqual(result['codex']['ok'], not expected)
+        finally:
+            time.tzset()
+
+    @unittest.skipUnless(hasattr(time, 'tzset'), 'requires system timezone switching')
+    def test_worker_singapore_and_shanghai_midnight_keep_same_epoch_boundary(self):
+        try:
+            for zone in ('Asia/Singapore', 'Asia/Shanghai'):
+                with self.subTest(zone=zone), patch.dict(os.environ, {'TZ': zone}), \
+                        patch(__name__+'.NOW', dt.datetime(2026, 10, 1, 16, 1, tzinfo=dt.timezone.utc)):
+                    time.tzset()
+                    self.panel.token_busy = False
+                    self.panel.messages = queue.Queue()
+                    self.panel.analytics_reader = UsageAnalytics(self.home)
+                    records = self.records('2026-10-01T15:59:59Z', 'yesterday', 'yesterday')
+                    records += self.records('2026-10-01T16:00:00Z', 'midnight', 'midnight')[1:]
+                    records += self.records('2026-10-01T16:01:01Z', 'future', 'future')[1:]
+                    self.write(records)
+                    result, snapshot = self.run_worker()
+                    self.assertEqual(result['date'], '2026-10-02')
+                    self.assertEqual(result['codex']['total'], 110)
+                    self.assertTrue(result['codex']['ok'])
+                    self.assertEqual(len(snapshot['events']), 2)
+        finally:
+            time.tzset()
 
     def test_analytics_failure_never_exposes_legacy_complete_zero(self):
         self.write(self.records())

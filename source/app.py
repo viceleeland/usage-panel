@@ -514,7 +514,8 @@ class UsagePanel:
                 result = {'date': dt.datetime.now().date().isoformat(),
                           'codex': {'available': False}, 'deepseek': {'available': False}}
             try:
-                now = dt.datetime.now().astimezone()
+                local_now = dt.datetime.now()
+                now = local_now.astimezone()
                 since, _ = monthly_cycle(anchor, now)
                 week = (now-dt.timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
                 snapshot = enrich_pricing_events(analytics_reader.read(now=now, since=min(since, week) if since else week))
@@ -523,7 +524,9 @@ class UsagePanel:
                     today = [e for e in snapshot['events'] if dt.datetime.fromtimestamp(e['timestamp']).date() == now.date()]
                     inputs = sum(e['input'] for e in today)
                     cached = None if any(e.get('cached') is None for e in today) else sum(e['cached'] for e in today)
-                    partial = analytics_partial_today(snapshot, now)
+                    # Keep the system's timezone rules at midnight, including
+                    # DST changes; astimezone() alone freezes today's offset.
+                    partial = analytics_partial_today(snapshot, local_now)
                     daily = {'input': inputs, 'cached': cached,
                         'output': sum(e['output'] for e in today), 'total': sum(e['total'] for e in today),
                         'available': True, 'partial': partial, 'ok': not partial}
@@ -586,7 +589,8 @@ class UsagePanel:
                           f'精确总量 {latest["total"]:,} tokens']
             else:
                 lines += ['官方日统计暂未提供。']
-            if self.codex_rows()[-1]['source'] != 'official':
+            if not any(row['date'] == dt.datetime.now().date().isoformat() and row['source'] == 'official'
+                       for row in self.codex_rows()):
                 lines += ['今天官方尚未返回；趋势图以本机暂估单独标注。']
             lines += ['', f'本机今日明细 · {dt.datetime.now():%Y-%m-%d} · 本地时区']
             for key, title in [('codex', 'Codex'), ('deepseek', 'DeepSeek / Claude Code')]:
@@ -626,7 +630,7 @@ class UsagePanel:
         dialog.configure(bg=BG, padx=20, pady=16)
         dialog.resizable(False, False)
         self.label(dialog, '近 7 天用量', 14, bold=True).pack(anchor='w')
-        self.label(dialog, '含今天 · m = 百万 token · 两张图分别缩放', 9, MUTED).pack(anchor='w', pady=(4,12))
+        self.label(dialog, 'm = 百万 token · 两张图分别缩放 · 日期见横轴', 9, MUTED).pack(anchor='w', pady=(4,12))
         charts = {}
         for key, title in [('codex', 'Codex'), ('deepseek', 'DeepSeek / Claude Code')]:
             title_var = tk.StringVar(master=dialog, value=title)
@@ -636,7 +640,7 @@ class UsagePanel:
             charts[key] = (title, title_var, canvas)
         status = tk.StringVar(master=dialog)
         self.label(dialog, '', 8, MUTED, textvariable=status, justify='left').pack(anchor='w')
-        self.label(dialog, 'Codex 沿用官方日期和总量；≈ / 橙色为今日本机暂估，不计入官方合计。\nDeepSeek 仍按本机本地日期统计；— 为未提供，* 为不完整，旧为缓存。',
+        self.label(dialog, 'Codex 窗口截至本地今天或较新的官方日期，沿用官方日期和总量。\n≈ / 橙色为今日本机暂估，不计入官方合计；DeepSeek 按本地日期。\n— 为未提供，* 为不完整，旧为缓存。',
                    8, MUTED, justify='left').pack(anchor='w', pady=(6,0))
         self.button(dialog, '关闭', dialog.destroy).pack(anchor='e', pady=(6,0))
 

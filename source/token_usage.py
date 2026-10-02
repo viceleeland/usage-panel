@@ -76,7 +76,11 @@ class DailyTokens:
                             tuple(max(a, b) for a, b in zip(previous, values)))
 
     def read(self, now=None):
-        now = now or dt.datetime.now().astimezone()
+        # Keep the default clock in local wall time. astimezone() would freeze
+        # today's UTC offset and misdate older events across DST transitions.
+        # With tzinfo=None, each event and the window start use the OS rules
+        # for their own instant; explicitly supplied aware clocks stay intact.
+        now = now or dt.datetime.now()
         if now.date() != self.day:
             self.files.clear()
             self.day = now.date()

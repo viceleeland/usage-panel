@@ -33,16 +33,19 @@ def codex_daily_rows(official, local_snapshot, today_iso):
 
     Official bucket dates are used verbatim. Only today's missing bucket can
     fall back to the same day's local counter, and its source stays explicit.
+    A service date ahead of local today extends the window; its timezone is
+    unknown and its date label must not be discarded or shifted.
     """
     today = dt.date.fromisoformat(today_iso)
     official = official or {}
     local_snapshot = local_snapshot or {}
     buckets = {bucket['date']: bucket['total']
                for bucket in official.get('buckets', [])}
+    end = max([today] + [dt.date.fromisoformat(date) for date in buckets])
     local = local_snapshot.get('codex') or {}
     rows = []
     for offset in range(6, -1, -1):
-        day = (today-dt.timedelta(days=offset)).isoformat()
+        day = (end-dt.timedelta(days=offset)).isoformat()
         row = {'date': day, 'total': None, 'source': 'missing',
                'ok': False, 'partial': False}
         if day in buckets:

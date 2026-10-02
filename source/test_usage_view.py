@@ -57,6 +57,26 @@ class LatestOfficialUsageTests(unittest.TestCase):
 
 
 class DailyRowsTests(unittest.TestCase):
+    def test_official_date_ahead_of_local_day_extends_window_without_shifting(self):
+        official = {'ok': True, 'buckets': [
+            {'date': '2026-10-02', 'total': 12}, {'date': '2026-10-03', 'total': 34}]}
+        rows = codex_daily_rows(official, self.local(date='2026-10-02'), '2026-10-02')
+        self.assertEqual(rows[0]['date'], '2026-09-27')
+        self.assertEqual(rows[-1]['date'], '2026-10-03')
+        self.assertEqual(rows[-1]['total'], 34)
+        self.assertEqual(rows[-2]['date'], '2026-10-02')
+        self.assertEqual(rows[-2]['total'], 12)
+        self.assertTrue(all(row['source'] == 'official' for row in rows[-2:]))
+
+    def test_local_fallback_keeps_its_own_date_when_official_date_is_ahead(self):
+        official = {'ok': True, 'buckets': [{'date': '2026-10-03', 'total': 34}]}
+        rows = codex_daily_rows(official, self.local(date='2026-10-02', total=99), '2026-10-02')
+        self.assertEqual(rows[-2]['date'], '2026-10-02')
+        self.assertEqual(rows[-2]['source'], 'local')
+        self.assertEqual(rows[-2]['total'], 99)
+        self.assertEqual(rows[-1]['source'], 'official')
+        self.assertEqual(sum(row['total'] for row in rows if row['source'] == 'official'), 34)
+
     def local(self, date='2025-04-14', total=9000000, **fields):
         codex = dict(available=True, ok=True, partial=False, total=total)
         codex.update(fields)

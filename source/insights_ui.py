@@ -1,4 +1,4 @@
-"""Monthly local usage dashboard; no network or conversation text access."""
+"""Official daily usage beside explicitly local cost and agent breakdowns."""
 import csv
 import datetime as dt
 import json
@@ -7,7 +7,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, ttk
 import webbrowser
-from usage_costs import event_cost
+from usage_costs import event_cost, monthly_cycle
+from usage_view import official_range_rows
 
 BG, INK, MUTED, GREEN, WHITE = '#F1F3EE', '#17362C', '#60736A', '#238C52', '#FFFFFF'
 DARK, MINT = '#163B2E', '#A8ECC4'
@@ -71,7 +72,7 @@ class InsightsWindow:
     def __init__(self, panel):
         self.panel = panel
         self.window = tk.Toplevel(panel.root)
-        self.window.title('Usage Panel · 月度费用与 Agent 用量')
+        self.window.title('Usage Panel · 官方每日用量与本机费用')
         self.window.configure(bg=BG)
         width, height = min(1220, self.window.winfo_screenwidth()-60), min(870, self.window.winfo_screenheight()-100)
         self.window.geometry(f'{width}x{height}+30+30')
@@ -100,24 +101,25 @@ class InsightsWindow:
                          pady=6, cursor='hand2', font=(FONT, 9))
 
     def _build(self):
-        outer = tk.Frame(self.window, bg=BG, padx=22, pady=16)
+        outer = tk.Frame(self.window, bg=BG, padx=22, pady=10)
         outer.pack(fill='both', expand=True)
-        head = tk.Frame(outer, bg=DARK, padx=20, pady=14)
+        head = tk.Frame(outer, bg=DARK, padx=20, pady=10)
         head.pack(fill='x', pady=(0, 12))
         identity = tk.Frame(head, bg=DARK)
         identity.pack(side='left')
         self.label(identity, 'USAGE PANEL  /  ANALYTICS', 9, MINT).pack(anchor='w')
-        self.label(identity, '用量与费用', 23, '#FFFFFF', bold=True).pack(anchor='w', pady=(4,0))
+        self.label(identity, '官方用量与本机费用', 23, '#FFFFFF', bold=True).pack(anchor='w', pady=(4,0))
         self.button(head, '导出当前表格', self.export).pack(side='right')
-        self.button(head, '刷新', lambda: self.panel.refresh_tokens()).pack(side='right', padx=8)
-        self.period_label = self.label(outer, '读取本机记录…', 10, MUTED)
+        self.refresh_button = self.button(head, '刷新', self.refresh_sources)
+        self.refresh_button.pack(side='right', padx=8)
+        self.period_label = self.label(outer, '读取官方日统计…', 10, MUTED, wraplength=1120, justify='left')
         self.period_label.pack(anchor='w', pady=(4, 12))
         metrics = tk.Frame(outer, bg=BG)
         metrics.pack(fill='x')
         self.metrics = {}
         for col, (key, title) in enumerate([
-                ('cost', '本周期 · Token 折算'), ('forecast', '周期结束 · 预计总费用'),
-                ('total', '主 / 子 Agent · Token'), ('pace', '最近 60 分钟 · 消耗速度')]):
+                ('cost', '本机周期 · Token 折算'), ('forecast', '本机周期 · 预计费用'),
+                ('total', '官方 Token · 所选日期范围'), ('pace', '本机近 60 分钟 · 速度')]):
             metrics.columnconfigure(col, weight=1, uniform='metric')
             card = tk.Frame(metrics, bg=DARK if col == 0 else WHITE, padx=16, pady=14)
             card.grid(row=0, column=col, sticky='nsew', padx=(0 if col == 0 else 8, 0))
@@ -149,7 +151,7 @@ class InsightsWindow:
                 self.model_select = widget
             widget.bind('<<ComboboxSelected>>', lambda _: self.render_tables())
         search.bind('<KeyRelease>', lambda _: self.render_tables())
-        self.label(filters, '筛选仅影响下方表格', 8, MUTED).pack(side='right')
+        self.button(filters, '最新官方日', self.select_latest_official).pack(side='right')
         style = ttk.Style(self.window)
         style.theme_use('clam')
         style.configure('Usage.TNotebook', background=BG, borderwidth=0)
@@ -161,20 +163,25 @@ class InsightsWindow:
         style.configure('Usage.Treeview.Heading', font=(FONT, 9, 'bold'), background='#EAF0E7', foreground=INK, padding=(6,8), relief='flat')
         self.tabs = ttk.Notebook(outer, style='Usage.TNotebook')
         self.tabs.pack(fill='both', expand=True)
-        self.tasks = self.table('任务 / Agent', [
+        self.tasks = self.table('本机任务 / Agent', [
             ('role', '角色', 76), ('model', '模型 / 主子合计', 200), ('effort', '推理档位', 70),
             ('input', '输入', 78), ('cached', '缓存输入', 78), ('output', '输出', 78),
             ('total', '合计 Token', 91), ('cost', '折算 USD', 106)], tree=True)
-        self.models = self.table('模型排行', [
+        self.models = self.table('本机模型排行', [
             ('model', '模型', 210), ('effort', '推理档位', 85),
             ('input', '输入', 115), ('cached', '缓存输入', 115),
             ('output', '输出', 115), ('total', '合计 Token', 125),
             ('share', 'Token 占比', 100), ('cost', '折算 USD', 120)])
-        self.days = self.table('每日明细', [
-            ('date', '日期', 180), ('total', '合计 Token', 200),
-            ('cost', '折算 USD', 200), ('unknown', '未定价 Token', 200)])
+        self.days = self.table('每日用量 · 官方', [
+            ('date', '官方日期', 108), ('total', '官方 Token', 116),
+            ('exact', '官方精确 Token', 155), ('state', '官方状态', 92),
+            ('local', '本机 Token', 116), ('cost', '本机折算 USD', 144),
+            ('unknown', '本机未定价 Token', 150)])
         self.tables = [self.tasks, self.models, self.days]
-        self.table_note = self.label(outer, '', 9, MUTED)
+        self.days.bind('<<TreeviewSelect>>', self.select_official_day)
+        self.tabs.bind('<<NotebookTabChanged>>', lambda _: self.draw_chart())
+        self.tabs.select(2)
+        self.table_note = self.label(outer, '', 9, MUTED, wraplength=1120, justify='left')
         self.table_note.pack(anchor='w', pady=(7, 0))
         settings = tk.Frame(outer, bg=BG)
         settings.pack(fill='x', pady=(12, 0))
@@ -220,6 +227,125 @@ class InsightsWindow:
         yscroll.grid(row=0, column=1, sticky='ns')
         xscroll.grid(row=1, column=0, sticky='ew')
         return table
+
+    def refresh_sources(self):
+        refresh = getattr(self.panel, 'refresh', None)
+        if refresh:
+            refresh()
+        self.panel.refresh_tokens()
+
+    def official_data(self):
+        return ((getattr(self.panel, 'result', {}) or {}).get('codex') or {}).get('daily_usage') or {}
+
+    def official_period(self):
+        """Calendar-label selection, independent of local model/agent filters."""
+        now = dt.datetime.now().astimezone()
+        today = now.date()
+        all_rows = official_range_rows(self.official_data())
+        newest = dt.date.fromisoformat(all_rows[-1]['date']) if all_rows else today
+        if self.scope.get() == '今日':
+            start = end = today
+        elif self.scope.get() == '最近 7 天':
+            # Match the main official trend window without shifting source dates.
+            end = max(today, newest)
+            start = end-dt.timedelta(days=6)
+        else:
+            anchor = self.panel.settings.get('billing_anchor')
+            try:
+                first, stop = monthly_cycle(anchor, now)
+            except ValueError:
+                first = stop = None
+            if first:
+                start = first.date()
+                end = min(stop.date()-dt.timedelta(days=1), max(today, newest))
+            else:
+                start = dt.date.fromisoformat(all_rows[0]['date']) if all_rows else today
+                end = max(today, newest)
+        return start.isoformat(), end.isoformat(), official_range_rows(
+            self.official_data(), start.isoformat(), end.isoformat())
+
+    def select_official_day(self, _event=None):
+        selected = self.days.selection()
+        if not selected or not self.days.exists(selected[0]):
+            return
+        day = self.days.set(selected[0], 'date')
+        current = getattr(self.panel, 'selected_official_date', None)
+        rows = official_range_rows(self.official_data())
+        effective = current or (rows[-1]['date'] if rows else None)
+        if day != effective:
+            setter = getattr(self.panel, 'set_official_date', None)
+            if setter:
+                setter(day)
+
+    def select_latest_official(self):
+        setter = getattr(self.panel, 'set_official_date', None)
+        if setter:
+            setter(None)
+        self.scope.set('最近 7 天')
+        self.render_tables()
+
+    def render_official_days(self):
+        start, end, reported = self.official_period()
+        official = {row['date']: row for row in reported}
+        snapshot = getattr(self.panel, 'analytics_snapshot', {}) or {}
+        local = {}
+        if snapshot.get('available'):
+            for event in valid_events(snapshot):
+                day = dt.datetime.fromtimestamp(event['timestamp']).date().isoformat()
+                if start <= day <= end:
+                    local.setdefault(day, []).append(event)
+        day = dt.date.fromisoformat(start)
+        last = dt.date.fromisoformat(end)
+        dates = []
+        while day <= last:
+            dates.append(day.isoformat())
+            day += dt.timedelta(days=1)
+        day_export = []
+        for day in reversed(dates):
+            source = official.get(day)
+            total = source['total'] if source else None
+            state = '已返回' if source and source['ok'] else '旧数据' if source else '未提供'
+            group = self.aggregate(local[day]) if day in local else None
+            # A missing local day may be outside the loaded log window. Do not
+            # invent a zero, price official-only tokens, or allocate the gap.
+            local_total = group['total'] if group else None
+            known = round(group['known_cost'], 6) if group else None
+            unknown = group['unpriced_tokens'] if group else None
+            node = self.days.insert('', 'end', iid='day:'+day,
+                tags=('alternate',) if len(day_export)%2 else (),
+                values=(day, tokens(total), f'{total:,}' if total is not None else '—',
+                        state, tokens(local_total), cost_text(group) if group else '—', tokens(unknown)))
+            self.sort_values[(self.days, node)] = {'total': total, 'exact': total,
+                'local': local_total, 'cost': known, 'unknown': unknown}
+            day_export.append([day, total, state, local_total, known, unknown])
+        self.export_data[self.days] = (['date', 'official_total_tokens', 'official_status',
+            'local_total_tokens', 'local_known_api_equivalent_usd', 'local_unpriced_tokens'], day_export)
+        total = sum(row['total'] for row in reported)
+        missing = len(dates)-len(reported)
+        stale = any(not row['ok'] for row in reported)
+        self.metrics['total'][0].configure(text=tokens(total) if reported else '—')
+        self.metrics['total'][1].configure(text=f'官方已返回 {len(reported)} / {len(dates)} 天 · 缺失 {missing} 天'
+            + ('\n旧数据 · 保留上次官方值' if stale else '\n仅官方合计 · 不含本机暂估'))
+        local_start, local_end = self.report.get('start'), self.report.get('end')
+        local_period = (f'本机费用周期 {local_start} → {local_end}（结束日不计入）' if local_start
+            else '本机月度费用需设置续费锚点' if not self.panel.settings.get('billing_anchor') else '本机费用正在按新周期重新统计…')
+        stamp = self.official_data().get('updated')
+        read_time = dt.datetime.fromtimestamp(stamp).strftime('%H:%M:%S') if isinstance(stamp, (int, float)) and math.isfinite(stamp) else '未读取'
+        self.period_label.configure(text=f'官方日期 {start} → {end}（均含；沿用官方日期） · 官方读取 {read_time}\n{local_period}')
+        self.official_summary = {'start': start, 'end': end, 'total': total if reported else None,
+                                 'reported': len(reported), 'missing': missing, 'stale': stale}
+        self.official_chart_rows = [official.get(day, {'date': day, 'total': None, 'ok': False})
+                                   for day in dates]
+        selected = getattr(self.panel, 'selected_official_date', None)
+        all_rows = official_range_rows(self.official_data())
+        selected = selected or (all_rows[-1]['date'] if all_rows else None)
+        # A date chosen in the main details dialog may lie outside this table's
+        # scope. Never substitute another row and accidentally overwrite it.
+        if selected in dates:
+            node = 'day:'+selected
+            self.days.selection_set(node)
+            self.days.focus(node)
+            self.days.see(node)
 
     def selected_events(self):
         snapshot = getattr(self.panel, 'analytics_snapshot', {}) or {}
@@ -280,14 +406,12 @@ class InsightsWindow:
         self.sort_values = {}
         events = self.selected_events()
         sessions = (getattr(self.panel, 'analytics_snapshot', {}) or {}).get('sessions', {})
-        tasks, models, days = {}, {}, {}
+        tasks, models = {}, {}
         for event in events:
             root = event.get('root_id') or event['session_id']
             tasks.setdefault(root, []).append(event)
             models.setdefault((event.get('model') or '未知模型', event.get('effort') or '—'), []).append(event)
-            day = dt.datetime.fromtimestamp(event['timestamp']).date().isoformat()
-            days.setdefault(day, []).append(event)
-        task_export, model_export, day_export = [], [], []
+        task_export, model_export = [], []
         for root, group in sorted(tasks.items(), key=lambda x: -sum(e['total'] for e in x[1])):
             row = self.aggregate(group)
             title = sessions.get(root, {}).get('title') or '任务 '+root[:8]
@@ -323,25 +447,22 @@ class InsightsWindow:
             self.sort_values[(self.models, node)] = {**row, 'cost': row['known_cost'], 'share': share}
             model_export.append([model, effort, row['input'], row['cached'], row['output'],
                 row['total'], round(share, 3), round(row['known_cost'], 6), row['unpriced_tokens']])
-        for day, group in sorted(days.items(), reverse=True):
-            row = self.aggregate(group)
-            node = self.days.insert('', 'end', tags=('alternate',) if len(day_export)%2 else (), values=(day, tokens(row['total']), cost_text(row), tokens(row['unpriced_tokens'])))
-            self.sort_values[(self.days, node)] = {**row, 'cost': row['known_cost'], 'unknown': row['unpriced_tokens']}
-            day_export.append([day, row['total'], round(row['known_cost'], 6), row['unpriced_tokens']])
         self.export_data = {
             self.tasks: (['task_id','task_title','agent_id','agent_path','role','model','effort',
                 'input_tokens','cached_input_tokens','output_tokens','total_tokens','known_api_equivalent_usd','unpriced_tokens'], task_export),
             self.models: (['model','effort','input_tokens','cached_input_tokens','output_tokens',
-                'total_tokens','token_share_percent','known_api_equivalent_usd','unpriced_tokens'], model_export),
-            self.days: (['date','total_tokens','known_api_equivalent_usd','unpriced_tokens'], day_export)}
-        self.table_note.configure(text=f'{len(tasks)} 个任务 · {len(task_export)} 组 Agent / 模型 · '
-            f'筛选合计 {tokens(total)} · 任务行已含子 Agent，请勿重复相加。')
+                'total_tokens','token_share_percent','known_api_equivalent_usd','unpriced_tokens'], model_export)}
+        self.render_official_days()
+        self.table_note.configure(text='官方缺失为 —；点日期同步主面板。模型 / 角色 / 搜索仅筛选本机分项。\n'
+            f'本机：{len(tasks)} 个任务 · {len(task_export)} 组 · {tokens(total)}；'
+            '费用非全账户账单，任务行已含子 Agent。')
         for table, position in positions.items():
             if position:
                 table.yview_moveto(position[0])
             if table in self.sorts:
                 column, reverse = self.sorts[table]
                 self.sort(table, column, reverse)
+        self.draw_chart()
 
     def sort(self, table, column, reverse=None):
         if reverse is None:
@@ -368,36 +489,34 @@ class InsightsWindow:
             return
         report = getattr(self.panel, 'analytics_report', {}) or {}
         snapshot = getattr(self.panel, 'analytics_snapshot', {}) or {}
-        revision = (snapshot.get('updated'), self.panel.settings.get('billing_anchor'), self.panel.settings.get('monthly_budget'))
+        official = self.official_data()
+        revision = (snapshot.get('updated'), self.panel.settings.get('billing_anchor'),
+                    self.panel.settings.get('monthly_budget'), official.get('updated'), official.get('ok'),
+                    tuple((row['date'], row['total']) for row in official_range_rows(official)),
+                    getattr(self.panel, 'selected_official_date', None), dt.datetime.now().date().isoformat())
         if force or revision != self.last_revision:
             self.report, self.last_revision = report, revision
             start, end = report.get('start'), report.get('end')
             pending = bool(self.panel.settings.get('billing_anchor')) and not start
-            self.period_label.configure(text=(f'本机 Codex · {start} → {end}（结束日不计入）'
-                if start else '正在按新周期重新统计…' if pending else '请设置续费锚点日期，以统计一个月的额度周期。'))
             values = list(valid_events(snapshot)) if not pending else []
             total = report.get('total_tokens', 0)
-            main = sum(t['main_tokens'] for t in report.get('tasks', []))
-            sub = sum(t['subagent_tokens'] for t in report.get('tasks', []))
             known, elapsed = report.get('known_cost', 0), report.get('elapsed_days', 0) or 0
             daily = known/elapsed if elapsed else None
             forecast = report.get('projected_cost')
             partial_forecast = forecast is None and report.get('projected_known_cost') is not None
             display_forecast = report.get('projected_known_cost') if partial_forecast else forecast
             self.metrics['cost'][0].configure(text=cost_text(report) if start and snapshot.get('available') else '—')
-            self.metrics['cost'][1].configure(text='Standard API 基础折算 · 非实付')
+            self.metrics['cost'][1].configure(text='仅本机 Standard API 折算 · 非全账户账单')
             self.metrics['forecast'][0].configure(text=money(display_forecast)+(' + ?' if partial_forecast else ''))
             remaining = max(0, (report.get('total_days', 0) or 0)-elapsed)
             self.metrics['forecast'][1].configure(text=('仅已知部分 · ' if partial_forecast else '')+
                 f'日均 {money(daily)}\n剩余 {remaining:.1f} 天')
-            self.metrics['total'][0].configure(text=tokens(total) if snapshot.get('available') and start else '—')
-            self.metrics['total'][1].configure(text=f'主 {tokens(main)} / 子 {tokens(sub)}')
             recent = [e for e in values if e['timestamp'] >= dt.datetime.now().timestamp()-3600]
             rate = self.aggregate(recent)
             self.metrics['pace'][0].configure(text=cost_text(rate)+'/h' if snapshot.get('available') else '—')
             self.metrics['pace'][1].configure(text=f'{tokens(rate["total"]/60)}/min · 最近一小时均值')
             unknown = report.get('unpriced_tokens', 0)
-            message = f'费率覆盖 {100*(total-unknown)/total:.1f}%' if total else '暂无可计量调用'
+            message = f'本机费率覆盖 {100*(total-unknown)/total:.1f}%' if total else '暂无本机可计量调用'
             if unknown:
                 message += f' · {tokens(unknown)} 未定价，金额含已知部分'
             if report.get('partial'):
@@ -422,23 +541,31 @@ class InsightsWindow:
 
     def draw_chart(self):
         self.chart.delete('all')
-        days, width = self.report.get('daily') or [], max(self.chart.winfo_width(), 600)
+        official_view = hasattr(self, 'tabs') and self.tabs.select() and self.tabs.index(self.tabs.select()) == 2
+        days = getattr(self, 'official_chart_rows', []) if official_view else self.report.get('daily') or []
+        width = max(self.chart.winfo_width(), 600)
         self.chart.create_text(0, 9, anchor='w', fill=MUTED, font=(FONT, 8),
-                              text='本周期每日折算 · USD · 未定价用量另列于明细')
+            text='官方每日 Token · m（百万） · — 未提供 · 旧为缓存' if official_view
+            else '本机每日折算 · USD（美元） · 不是 Token 数或全账户费用')
         if not days:
-            self.chart.create_text(width/2, 54, fill=MUTED, text='等待本周期用量')
+            self.chart.create_text(width/2, 54, fill=MUTED, text='等待官方日统计' if official_view else '等待本机周期用量')
             return
-        maximum = max((d.get('known_cost', 0) for d in days), default=0) or 1
+        field = 'total' if official_view else 'known_cost'
+        maximum = max((d.get(field) or 0 for d in days), default=0) or 1
         slot = (width-20)/len(days)
+        every = max(1, math.ceil((85 if official_view else 65)/slot))
         for i, day in enumerate(days):
-            cost, left = day.get('known_cost', 0), 10+i*slot
-            height = 48*cost/maximum
-            self.chart.create_rectangle(left, 76-height, left+max(3, slot-7), 76,
-                                        fill=GREEN if cost else '#D5DED4', outline='')
-            if cost and (len(days) <= 16 or i % 2 == 0):
-                self.chart.create_text(left+slot/2-3, 70-height, text=f'{cost:.1f}', fill=INK,
+            value, left = day.get(field), 10+i*slot
+            height = 48*(value or 0)/maximum
+            if value is not None:
+                self.chart.create_rectangle(left, 76-height, left+max(1, slot-7), 76,
+                    fill=MUTED if official_view and not day.get('ok') else GREEN if value else '#D5DED4', outline='')
+            if i % every == 0 or i == len(days)-1:
+                label = tokens(value) if official_view else money(value)
+                if official_view and value is not None and not day.get('ok'):
+                    label += '旧'
+                self.chart.create_text(left+slot/2-3, 70-height, text=label, fill=INK,
                                        font=('Consolas', 8), anchor='s')
-            if len(days) <= 16 or i % 3 == 0 or i == len(days)-1:
                 self.chart.create_text(left+slot/2-3, 89, text=day.get('date','')[5:],
                                        fill=MUTED, font=('Consolas', 8))
 
@@ -483,6 +610,10 @@ class InsightsWindow:
         dialog.title('统计口径与价格')
         dialog.configure(bg=BG, padx=22, pady=18)
         text = (
+            '每日官方 Token 与主面板同源，沿用官方日期与精确总量；读取可能延迟。\n'
+            '缺失日期显示 —；读取失败保留旧值，不用本机记录补成官方值。\n'
+            '官方日统计没有模型、Agent 或价格明细，不按差额分配全账户费用。\n'
+            '本机列按电脑日期；同名日期不保证与官方日界线相同。\n\n'
             '金额按已核验的 Standard API 单价折算，单位 USD，不是订阅实付账单。\n'
             '价格核验日期：2026-09-26；历史用量按该费率重算。\n\n'
             '缓存输入属于输入，推理 Token 属于输出，不重复加总。\n'

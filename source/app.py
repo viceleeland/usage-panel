@@ -17,7 +17,8 @@ from PIL import Image, ImageDraw, ImageGrab, ImageTk
 from providers import RADAR_MODELS, collect, read_json
 from token_usage import DailyTokens
 from alerts import check_alerts
-from usage_view import analytics_partial_today, codex_daily_rows, latest_official_usage, retain_daily_usage
+from usage_view import (analytics_partial_today, codex_daily_rows, latest_official_usage,
+                        official_range_rows, official_usage_for_date, retain_daily_usage)
 from usage_analytics import UsageAnalytics
 from usage_costs import monthly_cycle, build_report, enrich_pricing_events
 from insights_ui import InsightsWindow, cost_text, money
@@ -126,6 +127,7 @@ class UsagePanel:
         self.token_busy = False
         self.token_after_id = None
         self.tokens = {}
+        self.selected_official_date = None
         self.token_labels = {}
         self.local_token_labels = {}
         self.result = read_json(DATA/'usage-cache.json')
@@ -474,12 +476,13 @@ class UsagePanel:
                 if local_label is not None:
                     local_label.configure(text=text + ' · 仅本机')
                 daily = self.result.get('codex', {}).get('daily_usage') or {}
-                official = latest_official_usage(daily)
+                selected_date = getattr(self, 'selected_official_date', None)
+                official = official_usage_for_date(daily, selected_date)
                 if official:
                     text = f'官方 {official["date"]}  {token_text(official["total"])}'
-                    text += ' · 已报' if official['ok'] else ' · 旧数据'
+                    text += ' · 官方返回' if official['ok'] else ' · 旧数据'
                 else:
-                    text = '官方日用量 — · 暂未提供'
+                    text = f'官方 {selected_date} — · 未提供' if selected_date else '官方日用量 — · 暂未提供'
             label.configure(text=text)
         self.update_refresh_status()
 
@@ -491,7 +494,19 @@ class UsagePanel:
         quota = stamp(self.result.get('codex', {}).get('updated'))
         official = stamp((self.result.get('codex', {}).get('daily_usage') or {}).get('updated'))
         local = stamp(self.tokens.get('updated'))
-        self.updated_label.configure(text=f'额度 {quota} · 官方日统计 {official} · 本机 {local}')
+        self.updated_label.configure(text=f'额度 {quota} · 官方读取 {official} · 本机 {local}')
+
+    def set_official_date(self, date=None):
+        """Keep the main panel and official daily table on one calendar label."""
+        if date is not None and dt.date.fromisoformat(date).isoformat() != date:
+            raise ValueError('Expected an official ISO date')
+        if date == getattr(self, 'selected_official_date', None):
+            return
+        self.selected_official_date = date
+        self.update_token_labels()
+        insights = getattr(self, 'insights_window', None)
+        if insights is not None:
+            insights.last_revision = None
 
     def codex_rows(self):
         return codex_daily_rows(self.result.get('codex', {}).get('daily_usage'), self.tokens,
@@ -561,7 +576,7 @@ class UsagePanel:
         partial = forecast is None and report.get('projected_known_cost') is not None
         if partial:
             forecast = report['projected_known_cost']
-        self.cost_label.configure(text=f'周期折算 {cost_text(report)}  ·  预计 {money(forecast)}'+(' + ?' if partial else ''))
+        self.cost_label.configure(text=f'本机折算 {cost_text(report)}  ·  预计 {money(forecast)}'+(' + ?' if partial else ''))
         self.cost_note.configure(text=f'{report["start"]} → {report["end"]} · API 折算非实付'+
             (' · ? 为未定价用量' if report.get('unpriced_tokens') else '')+
             (' · 读取不完整' if report.get('partial') else ''))
@@ -575,20 +590,31 @@ class UsagePanel:
 
     def usage_details(self):
         dialog = tk.Toplevel(self.root)
-        dialog.title('今日用量与重置卡')
+        dialog.title('官方日用量与本机明细')
         dialog.configure(bg=BG, padx=20, pady=16)
+        dates = [row['date'] for row in official_range_rows(self.result.get('codex', {}).get('daily_usage'))]
+        selection = tk.StringVar(master=dialog, value=getattr(self, 'selected_official_date', None) or '最新官方日')
+        choose = tk.Frame(dialog, bg=BG)
+        choose.pack(fill='x', pady=(0, 8))
+        self.label(choose, '官方日期', 10).pack(side='left')
+        tk.OptionMenu(choose, selection, '最新官方日', *reversed(dates),
+                      command=lambda value: self.set_official_date(None if value == '最新官方日' else value)).pack(side='left')
         content = tk.StringVar(master=dialog)
         self.label(dialog, '', 10, justify='left', textvariable=content).pack(anchor='w')
         def update():
             account = self.result.get('codex', {})
             daily = account.get('daily_usage') or {}
-            latest = latest_official_usage(daily)
+            selected_date = getattr(self, 'selected_official_date', None)
+            selection.set(selected_date or '最新官方日')
+            latest = official_usage_for_date(daily, selected_date)
             lines = ['Codex · 官方账户统计']
             if latest:
-                lines += [f'最近已报 {latest["date"]} · {token_text(latest["total"])}'+('（旧数据）' if not daily.get('ok') else ''),
+                lines += [f'官方日期 {latest["date"]} · {token_text(latest["total"])}'+('（旧数据）' if not daily.get('ok') else ''),
                           f'精确总量 {latest["total"]:,} tokens']
             else:
-                lines += ['官方日统计暂未提供。']
+                lines += [f'官方 {selected_date} 未提供，不用本机总量代替。' if selected_date else '官方日统计暂未提供。']
+            lines += ['官方仅返回日期和总量；未提供模型、输入、输出、缓存或费用分项。',
+                      '下方本机分项不能当作上述官方总量的完整分解。']
             if not any(row['date'] == dt.datetime.now().date().isoformat() and row['source'] == 'official'
                        for row in self.codex_rows()):
                 lines += ['今天官方尚未返回；趋势图以本机暂估单独标注。']
@@ -609,7 +635,7 @@ class UsagePanel:
                 lines += ['账户数据尚未更新，以下可能为旧数据。']
             lines += [f'到期 {dt.datetime.fromtimestamp(stamp):%Y-%m-%d %H:%M}' for stamp in credits.get('expires', [])]
             lines += ['', 'm = 百万 token；卡片仅展示，到期明细可能不完整。',
-                      '官方日统计每 5 分钟读取，日期与数值沿用官方，可能有延迟。',
+                      '官方日统计每 5 分钟读取；读取时间不是官方统计截至时间，数据可能延迟。',
                       '主面板优先显示官方已报日期与总量；本机明细每 10 秒更新。',
                       '本机计数仅含本机保留日志，不等同于官方总量，不与官方相加。',
                       '本机缓存命中率 = 缓存命中 ÷ 输入（输入已含缓存）。',
@@ -664,7 +690,7 @@ class UsagePanel:
                 if key == 'codex':
                     reported = [v for v in known if v['source'] == 'official']
                     stale = '（旧数据）' if any(not v['ok'] for v in reported) else ''
-                    title_var.set(f'Codex · 官方已报 {token_text(sum(v["total"] for v in reported))}{stale}' if reported else 'Codex · 官方日统计暂未提供')
+                    title_var.set(f'Codex · 官方 7 天已返回合计 {token_text(sum(v["total"] for v in reported))}{stale}' if reported else 'Codex · 官方日统计暂未提供')
                 else:
                     title_var.set(f'{title} · 本机 7 天 {token_text(sum(v.get("total", 0) for v in known))}{suffix}' if known else title+' · 未找到本机记录')
                 maximum = max([v.get('total', 0) for v in known]+[1])

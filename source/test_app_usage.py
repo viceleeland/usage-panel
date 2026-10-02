@@ -19,7 +19,8 @@ from unittest.mock import Mock, patch
 from token_usage import DailyTokens
 from usage_analytics import UsageAnalytics
 from usage_costs import build_report, enrich_pricing_events, monthly_cycle
-from usage_view import analytics_partial_today, codex_daily_rows, latest_official_usage, retain_daily_usage
+from usage_view import (analytics_partial_today, codex_daily_rows, latest_official_usage,
+                        official_usage_for_date, retain_daily_usage)
 
 
 NOW = dt.datetime(2026, 10, 2, 12).astimezone()
@@ -54,15 +55,16 @@ def application_usage_class():
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                  and node.name in ('token_text', 'cache_hit_text')]
     panel = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'UsagePanel')
-    wanted = {'update_token_labels', 'update_refresh_status', 'codex_rows', 'refresh_tokens', 'poll'}
+    wanted = {'update_token_labels', 'update_refresh_status', 'codex_rows', 'refresh_tokens', 'poll', 'set_official_date'}
     panel.body = [node for node in panel.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     assert {node.name for node in panel.body} == wanted
-    namespace = dict(dt=SimpleNamespace(datetime=FixedDateTime, timedelta=dt.timedelta),
+    namespace = dict(dt=SimpleNamespace(datetime=FixedDateTime, timedelta=dt.timedelta, date=dt.date),
                      threading=SimpleNamespace(Thread=ImmediateThread), queue=queue, time=time,
                      monthly_cycle=monthly_cycle, build_report=build_report,
                      enrich_pricing_events=enrich_pricing_events,
                      analytics_partial_today=analytics_partial_today, codex_daily_rows=codex_daily_rows,
-                     latest_official_usage=latest_official_usage, retain_daily_usage=retain_daily_usage)
+                     latest_official_usage=latest_official_usage, official_usage_for_date=official_usage_for_date,
+                     retain_daily_usage=retain_daily_usage)
     exec(compile(ast.Module(body=functions + [panel], type_ignores=[]), str(source), 'exec'), namespace)
     return namespace['UsagePanel']
 
@@ -102,6 +104,29 @@ class AppUsageTests(unittest.TestCase):
         self.assertNotIn('18.000m', second)
         self.assertEqual(self.panel.codex_rows()[-1]['total'], 11_322_000)
         self.assertIn('本机今日 2.000m', self.panel.token_labels['deepseek'].text)
+
+    def test_selected_official_day_stays_identical_across_refreshes(self):
+        self.panel.result['codex']['daily_usage']['buckets'] = [
+            {'date': '2026-10-01', 'total': 340000123},
+            {'date': '2026-10-02', 'total': 130000456}]
+        self.panel.tokens['codex']['total'] = 125000789
+        self.panel.set_official_date('2026-10-01')
+        primary, secondary = self.labels()
+        self.assertIn('官方 2026-10-01  340.000m', primary)
+        self.assertNotIn('125.001m', primary)
+        self.assertIn('125.001m', secondary)
+        self.panel.result['codex']['daily_usage']['updated'] = 300
+        self.assertEqual(self.labels()[0], primary)
+        self.panel.set_official_date(None)
+        self.assertIn('官方 2026-10-02  130.000m', self.labels()[0])
+
+    def test_missing_selected_official_day_never_uses_local_or_latest(self):
+        self.panel.set_official_date('2026-09-01')
+        text = self.labels()[0]
+        self.assertIn('2026-09-01', text)
+        self.assertIn('未提供', text)
+        self.assertNotIn('11.322m', text)
+        self.assertNotIn('12.000m', text)
 
     def test_explicit_zero_and_stale_official_values_are_not_replaced_by_local(self):
         for ok in (True, False):
@@ -156,7 +181,7 @@ class AppUsageTests(unittest.TestCase):
         self.labels()
         after = self.panel.updated_label.text
         self.assertNotEqual(before, after)
-        for name, timestamp in (('额度', 100), ('官方日统计', 150), ('本机', 210)):
+        for name, timestamp in (('额度', 100), ('官方读取', 150), ('本机', 210)):
             self.assertIn(f'{name} {dt.datetime.fromtimestamp(timestamp):%H:%M:%S}', after)
 
     def test_poll_preserves_successful_daily_read_when_quota_refresh_fails(self):

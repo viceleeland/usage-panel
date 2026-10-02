@@ -20,12 +20,36 @@ def analytics_partial_today(snapshot, now):
 
 def latest_official_usage(official):
     """Select the latest reported date without relabelling it as local today."""
-    official = official or {}
-    # The service's calendar timezone is not documented. A bucket date ahead
-    # of the computer's local date is not evidence of a future usage event.
-    buckets = official.get('buckets', [])
-    latest = max(buckets, key=lambda row: row['date'], default=None)
-    return dict(latest, ok=bool(official.get('ok'))) if latest else None
+    return official_usage_for_date(official)
+
+
+def official_range_rows(official, start_iso=None, end_iso=None):
+    """Only reported official dates, with inclusive calendar bounds.
+
+    These labels have no declared timezone. Never shift them into the local
+    timezone, fill absent days with local counters, or imply a cost breakdown.
+    """
+    official = official if isinstance(official, dict) else {}
+    rows = {}
+    for row in official.get('buckets') or []:
+        if not isinstance(row, dict):
+            continue
+        day, total = row.get('date'), row.get('total')
+        try:
+            valid_date = isinstance(day, str) and dt.date.fromisoformat(day).isoformat() == day
+        except ValueError:
+            valid_date = False
+        if (not valid_date or not isinstance(total, int) or isinstance(total, bool)
+                or total < 0 or (start_iso and day < start_iso) or (end_iso and day > end_iso)):
+            continue
+        rows[day] = {'date': day, 'total': total, 'ok': bool(official.get('ok'))}
+    return [rows[day] for day in sorted(rows)]
+
+
+def official_usage_for_date(official, date=None):
+    """Requested official day, or latest when no day is selected."""
+    rows = official_range_rows(official, date, date) if date is not None else official_range_rows(official)
+    return rows[-1] if rows else None
 
 
 def codex_daily_rows(official, local_snapshot, today_iso):

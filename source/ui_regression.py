@@ -88,7 +88,7 @@ def local_tokens_remain_live_with_official_totals():
         quota_stamp = dt.datetime.fromtimestamp(100).strftime('%H:%M:%S')
         assert f'额度 {quota_stamp}' in second_stamp, second_stamp
         official_stamp = dt.datetime.fromtimestamp(150).strftime('%H:%M:%S')
-        assert f'官方日统计 {official_stamp}' in second_stamp, second_stamp
+        assert f'官方读取 {official_stamp}' in second_stamp, second_stamp
         local_stamp = dt.datetime.fromtimestamp(210).strftime('%H:%M:%S')
         assert f'本机 {local_stamp}' in second_stamp, second_stamp
     finally:
@@ -240,12 +240,12 @@ def closed_dialogs_with_background_gc():
     panel.root.after(1, iteration)
     panel.root.mainloop()
     gc.collect()
-    if len(finalized) != 80 or not all(finalized):
-        failures.append(f'Expected 80 variables released on UI thread; '
+    if len(finalized) != 100 or not all(finalized):
+        failures.append(f'Expected 100 variables released on UI thread; '
                         f'got {len(finalized)}, {finalized.count(False)} off-thread')
     if failures:
         raise AssertionError('; '.join(failures))
-    print('PASS: 20 detail/trend close cycles cancel timers and finalize 80 Tk '
+    print('PASS: 20 detail/trend close cycles cancel timers and finalize 100 Tk '
           'variables on the UI thread, even with background collection')
 
 

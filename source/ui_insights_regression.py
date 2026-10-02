@@ -89,18 +89,27 @@ def setup():
     panel.alerts_enabled = app.tk.BooleanVar(panel.root, value=True)
     panel.analytics_snapshot = fixture()
     panel.analytics_report = build_report(panel.analytics_snapshot, '2026-09-21', NOW)
+    panel.result = {'codex': {'daily_usage': {'ok': True, 'updated': NOW.timestamp(),
+        'buckets': [{'date': (NOW-dt.timedelta(days=1)).date().isoformat(), 'total': 340_000_123},
+                    {'date': NOW.date().isoformat(), 'total': 130_000_456}]}}}
+    panel.selected_official_date = None
+    panel.tokens = {}
+    panel.token_labels = {'codex': app.tk.Label(panel.root)}
+    panel.local_token_labels = {'codex': app.tk.Label(panel.root)}
     panel.insights_window = None
     panel.cost_label = None
     panel.cost_note = None
     panel.token_after_id = None
     panel.closed = False
     panel.refresh_calls = 0
+    panel.official_refresh_calls = 0
     panel.tray = SimpleNamespace(stop=lambda: None)
 
     def refresh_tokens():
         panel.refresh_calls += 1
 
     panel.refresh_tokens = refresh_tokens
+    panel.refresh = lambda: setattr(panel, 'official_refresh_calls', panel.official_refresh_calls+1)
     errors = []
     panel.root.report_callback_exception = lambda kind, value, tb: errors.append(f'{kind.__name__}: {value}')
     return panel, errors
@@ -117,6 +126,7 @@ def dispose(panel):
         panel.quit()
     # Break the synthetic refresh closure on the owning thread.
     panel.refresh_tokens = None
+    panel.refresh = None
     gc.collect()
 
 
@@ -128,8 +138,10 @@ def dashboard(screenshot=None):
         all_events = panel.analytics_snapshot['events']
         assert len(view.selected_events()) == len(all_events)
         assert panel.show_insights() is window, 'Opening twice created another dashboard'
-        expected = sum(e['total'] for e in all_events)
+        expected = sum(e['total'] for e in panel.result['codex']['daily_usage']['buckets'])
         assert view.metrics['total'][0].cget('text') == tokens(expected)
+        assert view.tabs.index(view.tabs.select()) == 2, 'Official daily view is not the default'
+        assert panel.selected_official_date is None, 'Rendering pinned the dynamic latest official date'
         for selected_role, expected_role in [('主 Agent', 'main'), ('子 Agent', 'subagent'),
                                              ('归属未知', 'unknown')]:
             view.role.set(selected_role)
@@ -186,6 +198,161 @@ def dashboard(screenshot=None):
           + ('; synthetic screenshot saved' if screenshot else ''))
 
 
+def official_daily():
+    """The reported mismatch, with no credentials, log files, or live requests."""
+    global NOW
+    previous_now = NOW
+    NOW = dt.datetime(2026, 10, 2, 12, tzinfo=NOW.tzinfo)
+    from insights_ui import cost_text
+    from usage_costs import build_report
+    panel, errors = setup()
+    try:
+        panel.settings['billing_anchor'] = '2026-10-01'
+        yesterday = dict(panel.analytics_snapshot['events'][0],
+            timestamp=NOW.replace(day=1, hour=12).timestamp(),
+            input=125_000_000, output=789, total=125_000_789,
+            cached=100_000_000, request_input=125_000_000)
+        today = dict(panel.analytics_snapshot['events'][0],
+            timestamp=NOW.replace(hour=10).timestamp())
+        panel.analytics_snapshot['events'] = [yesterday, today]
+        panel.analytics_report = build_report(panel.analytics_snapshot, '2026-10-01', NOW)
+        daily = panel.result['codex']['daily_usage']
+        daily['buckets'] = [{'date': '2026-10-01', 'total': 340_000_123}]
+        view, _ = open_window(panel)
+
+        def refresh():
+            # Simulate the existing periodic callback without adding timers.
+            if view.after_id is not None:
+                view.window.after_cancel(view.after_id)
+                view.after_id = None
+            view.refresh()
+            panel.root.update()
+
+        assert view.tabs.index(view.tabs.select()) == 2
+        assert view.days.set('day:2026-10-01', 'total') == '340.000m'
+        assert view.days.set('day:2026-10-01', 'exact') == '340,000,123'
+        assert view.days.set('day:2026-10-01', 'local') == '125.001m'
+        assert view.days.set('day:2026-10-02', 'total') == '—', 'Local today replaced missing official data'
+        assert view.days.set('day:2026-10-02', 'local') != '—'
+        assert view.metrics['total'][0].cget('text') == '340.000m'
+        assert view.official_summary['missing'] == 1
+        assert panel.selected_official_date is None, 'Default selection pinned latest mode'
+        chart_text = lambda: [view.chart.itemcget(item, 'text') for item in view.chart.find_all()
+                              if view.chart.type(item) == 'text']
+        assert any('官方每日 Token' in text for text in chart_text())
+        assert '340.000m' in chart_text() and '—' in chart_text()
+        assert not any('$' in text for text in chart_text()), 'Default official chart still plots dollars'
+        view.tabs.select(0)
+        panel.root.update()
+        assert any('本机每日折算 · USD' in text for text in chart_text())
+        amounts = [text for text in chart_text() if text.startswith('$') or text.startswith('<$')]
+        assert amounts, 'Local cost bars lost their explicit dollar units'
+        view.tabs.select(2)
+        panel.root.update()
+        model_columns, model_rows = view.export_data[view.models]
+        assert sum(row[model_columns.index('total_tokens')] for row in model_rows) == 125_205_789, 'Official gap was allocated to model rows'
+        assert view.days.set('day:2026-10-01', 'cost') == cost_text(view.aggregate([yesterday]))
+
+        # Official refresh alone must redraw: the local snapshot revision stays
+        # unchanged, and a new official date must preserve dynamic latest mode.
+        local_revision = panel.analytics_snapshot['updated']
+        daily['buckets'].append({'date': '2026-10-02', 'total': 130_000_456})
+        daily['updated'] += 1
+        refresh()
+        assert panel.analytics_snapshot['updated'] == local_revision
+        assert view.days.set('day:2026-10-02', 'exact') == '130,000,456'
+        assert view.metrics['total'][0].cget('text') == '470.001m'
+        assert view.days.selection() == ('day:2026-10-02',)
+        assert panel.selected_official_date is None
+        old_revision = view.last_revision
+        daily['updated'] += 1
+        refresh()
+        assert view.last_revision != old_revision, 'Official query timestamp alone did not refresh'
+
+        # A user's historical selection links the main label to the same raw
+        # official day, including on later source refreshes.
+        view.days.selection_set('day:2026-10-01')
+        panel.root.update()
+        assert panel.selected_official_date == '2026-10-01'
+        assert '2026-10-01' in panel.token_labels['codex'].cget('text')
+        assert '340.000m' in panel.token_labels['codex'].cget('text')
+        daily.update(ok=False, updated=daily['updated']+1)
+        refresh()
+        assert view.days.set('day:2026-10-01', 'state') == '旧数据'
+        assert view.days.set('day:2026-10-01', 'exact') == '340,000,123'
+        assert '旧数据' in view.metrics['total'][1].cget('text')
+
+        # Date/model filters cannot manufacture official model-level totals.
+        view.scope.set('今日')
+        view.model.set('a-model-with-no-local-records')
+        view.render_tables()
+        panel.root.update()
+        assert not view.models.get_children()
+        assert view.metrics['total'][0].cget('text') == '130.000m'
+        assert panel.selected_official_date == '2026-10-01', 'Out-of-scope programmatic selection overwrote main date'
+        assert not view.days.selection()
+        daily['buckets'] = daily['buckets'][:1]
+        daily.update(ok=True, updated=daily['updated']+1)
+        refresh()
+        assert view.metrics['total'][0].cget('text') == '—'
+        view.days.selection_set('day:2026-10-02')
+        panel.root.update()
+        assert panel.selected_official_date == '2026-10-02'
+        assert '未提供' in panel.token_labels['codex'].cget('text')
+        view.select_latest_official()
+        panel.root.update()
+        assert panel.selected_official_date is None
+
+        # Even a date selected outside the current cycle remains selected in
+        # the main panel; rendering this table must not switch it back.
+        panel.set_official_date('2026-09-01')
+        refresh()
+        assert panel.selected_official_date == '2026-09-01'
+        assert not view.days.selection()
+
+        # Official daily history does not depend on a configured local billing
+        # cycle or on the presence of local model/Agent records.
+        panel.settings.pop('billing_anchor')
+        panel.analytics_snapshot = {'available': False, 'events': [], 'sessions': {}, 'updated': local_revision+1}
+        panel.analytics_report = {}
+        panel.set_official_date(None)
+        refresh()
+        assert view.days.set('day:2026-10-01', 'exact') == '340,000,123'
+        assert view.days.set('day:2026-10-01', 'local') == '—'
+        assert view.days.set('day:2026-10-01', 'cost') == '—'
+        assert view.metrics['cost'][0].cget('text') == '—'
+        assert view.metrics['total'][0].cget('text') == '340.000m'
+        assert not view.tasks.get_children() and not view.models.get_children()
+        view.refresh_button.invoke()
+        assert panel.refresh_calls == 1 and panel.official_refresh_calls == 1
+        names, rows = view.export_data[view.days]
+        first = next(dict(zip(names, row)) for row in rows if row[0] == '2026-10-01')
+        assert first['official_total_tokens'] == 340_000_123
+        assert first['local_total_tokens'] is None and first['local_known_api_equivalent_usd'] is None
+
+        # An official day ahead of local today can fall in the next billing
+        # cycle. Rendering the current cycle must not pin an older date.
+        NOW = dt.datetime(2026, 9, 30, 12, tzinfo=NOW.tzinfo)
+        panel.settings['billing_anchor'] = '2026-09-01'
+        daily['buckets'] = [{'date': '2026-09-30', 'total': 99}, {'date': '2026-10-01', 'total': 100}]
+        daily['updated'] += 1
+        view.scope.set('本周期')
+        refresh()
+        assert view.official_summary['end'] == '2026-09-30'
+        assert not view.days.selection() and panel.selected_official_date is None
+        view.select_latest_official()
+        panel.root.update()
+        assert view.scope.get() == '最近 7 天'
+        assert view.official_summary['end'] == '2026-10-01'
+        assert view.days.selection() == ('day:2026-10-01',)
+        assert panel.selected_official_date is None
+        assert not errors, errors
+    finally:
+        dispose(panel)
+        NOW = previous_now
+    print('PASS: official 340000123 stays separate from local 125000789; missing/stale dates, linked selection, source-only refresh and no-anchor history')
+
+
 def exports():
     import insights_ui
     panel, errors = setup()
@@ -199,9 +366,12 @@ def exports():
                  r[columns.index('model')], r[columns.index('effort')]) for r in rows]
         assert len(keys) == len(set(keys))
         assert len(rows) == len(panel.analytics_snapshot['events'])-1, 'Same agent/model requests were not aggregated'
-        for table in (view.models, view.days):
+        for table in (view.models,):
             names, table_rows = view.export_data[table]
             assert sum(row[names.index('total_tokens')] for row in table_rows) == total
+        names, table_rows = view.export_data[view.days]
+        assert sum((row[names.index('local_total_tokens')] or 0) for row in table_rows) == total
+        assert sum((row[names.index('official_total_tokens')] or 0) for row in table_rows) == 470_000_579
         # Tree totals and children agree independently for every root task.
         for parent in view.tasks.get_children():
             task_title = view.tasks.item(parent, 'text')
@@ -333,11 +503,9 @@ def scopes():
         panel.analytics_report = report = build_report(snapshot, '2026-09-21', NOW)
         assert report['partial'], 'Malformed input fixture did not exercise report validation'
         view, _ = open_window(panel)
-        assert view.metrics['total'][0].cget('text') == tokens(report['total_tokens'])
+        assert view.metrics['total'][0].cget('text') == tokens(470_000_579)
         assert view.metrics['cost'][0].cget('text') == cost_text(report)
-        expected_main = sum(t['main_tokens'] for t in report['tasks'])
-        expected_sub = sum(t['subagent_tokens'] for t in report['tasks'])
-        assert view.metrics['total'][1].cget('text') == f'主 {tokens(expected_main)} / 子 {tokens(expected_sub)}'
+        assert '官方已返回' in view.metrics['total'][1].cget('text')
         for scope, lower in [('本周期', cycle), ('最近 7 天', week), ('今日', day)]:
             view.scope.set(scope)
             view.render_tables()
@@ -346,7 +514,9 @@ def scopes():
             assert selected == expected, f'{scope} crossed its exact time boundary'
             names, rows = view.export_data[view.tasks]
             assert sum(r[names.index('total_tokens')] for r in rows) == sum(e['total'] for e in expected)
-            assert view.metrics['total'][0].cget('text') == tokens(report['total_tokens']), 'Table scope changed cycle card'
+            official_total = 130_000_456 if scope == '今日' else 470_000_579
+            assert view.metrics['total'][0].cget('text') == tokens(official_total), 'Date scope did not update official card'
+            assert view.metrics['cost'][0].cget('text') == cost_text(report), 'Local date filter changed cycle cost'
         view.scope.set('最近 7 天')
         selected_ids = {e['session_id'] for e in view.selected_events()}
         assert {'at-week', 'before-cycle'}.issubset(selected_ids)
@@ -399,7 +569,7 @@ def stale_anchor():
         panel.root.after(1600, panel.root.quit)
         panel.root.mainloop()
         assert view.metrics['cost'][0].cget('text') == '—'
-        assert view.metrics['total'][0].cget('text') == '—'
+        assert view.metrics['total'][0].cget('text') == '470.001m', 'Pending local scan hid independent official totals'
         assert '正在' in view.period_label.cget('text')
         stale_snapshot = dict(fixture(), updated=NOW.timestamp()+1)
         stale_report = build_report(stale_snapshot, '2026-09-21', NOW)
@@ -462,7 +632,7 @@ def layout():
     panel, errors = setup()
     try:
         view, window = open_window(panel)
-        for width, height in ((1220, 870), (900, 620)):
+        for width, height in ((1220, 870), (900, 700)):
             window.geometry(f'{width}x{height}+20+20')
             panel.root.update()
             frame = view.settings_frame
@@ -486,7 +656,7 @@ def layout():
         assert not errors, errors
     finally:
         dispose(panel)
-    print('PASS: settings/save/help and usable table remain inside both 1220x870 and supported 900x620 layouts')
+    print('PASS: settings/save/help and usable table remain inside both 1220x870 and supported 900x700 layouts')
 
 
 def lifecycle():
@@ -573,7 +743,7 @@ def shutdown():
 
 
 def main():
-    scenarios = {'dashboard': dashboard, 'exports': exports, 'settings': settings,
+    scenarios = {'dashboard': dashboard, 'official-daily': official_daily, 'exports': exports, 'settings': settings,
                  'sorting': sorting, 'scopes': scopes, 'stale-anchor': stale_anchor,
                  'layout': layout, 'lifecycle': lifecycle, 'shutdown': shutdown}
     parser = argparse.ArgumentParser(description=__doc__)

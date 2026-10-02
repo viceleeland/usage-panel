@@ -14,10 +14,10 @@ import webbrowser
 import psutil
 import pystray
 from PIL import Image, ImageDraw, ImageGrab, ImageTk
-from providers import collect, read_json
+from providers import RADAR_MODELS, collect, read_json
 from token_usage import DailyTokens
 from alerts import check_alerts
-from usage_view import analytics_partial_today, codex_daily_rows, retain_daily_usage
+from usage_view import analytics_partial_today, codex_daily_rows, latest_official_usage, retain_daily_usage
 from usage_analytics import UsageAnalytics
 from usage_costs import monthly_cycle, build_report, enrich_pricing_events
 from insights_ui import InsightsWindow, cost_text, money
@@ -32,7 +32,7 @@ GREEN = '#238C52'
 FONT = 'Microsoft YaHei UI'
 MONO = 'Consolas'
 LEVELS = ['ultra', 'max', 'xhigh', 'high', 'medium', 'low']
-DEFAULT_SCORES = {name: ['']*6 for name in ['Astra','Sol','Terra','Luna']}
+DEFAULT_SCORES = {name: ['']*6 for name in RADAR_MODELS.values()}
 
 def token_text(value):
     if value is None:
@@ -127,6 +127,7 @@ class UsagePanel:
         self.token_after_id = None
         self.tokens = {}
         self.token_labels = {}
+        self.local_token_labels = {}
         self.result = read_json(DATA/'usage-cache.json')
         for data in self.result.values():
             if isinstance(data,dict):
@@ -184,6 +185,7 @@ class UsagePanel:
 
     def draw(self):
         self.token_labels = {}
+        self.local_token_labels = {}
         self.cost_label = None
         self.cost_note = None
         for child in self.body.winfo_children():
@@ -227,13 +229,7 @@ class UsagePanel:
                         tooltip.append(f'{card["name"]} {window["label"]} {value}')
                 else:
                     self.label(self.body, '—  暂无额度数据', 10, MUTED).pack(anchor='w')
-                daily = data.get('daily_usage') or {}
-                latest = max(daily.get('buckets') or [], key=lambda b: b['date'], default=None)
                 note = data.get('note', '正在读取本机登录状态…')
-                if latest and data.get('ok'):
-                    note = f'官方已报 {latest["date"][5:]}  {token_text(latest["total"])} · 可能延迟'
-                    if not daily.get('ok'):
-                        note += ' · 旧数据'
                 self.label(self.body, note, 8, MUTED,
                     wraplength=480, justify='left').pack(anchor='w', pady=(4,5))
                 if not data.get('ok') and data.get('updated'):
@@ -324,10 +320,10 @@ class UsagePanel:
         table=tk.Frame(self.score_section,bg=BG)
         table.pack(fill='x',pady=(4,0))
         for col, text in enumerate(['模型']+LEVELS):
-            self.label(table,text,9,MUTED,mono=True,width=7,anchor='w' if col==0 else 'center').grid(row=0,column=col,pady=2)
+            self.label(table,text,9,MUTED,mono=True,width=15 if col==0 else 7,anchor='w' if col==0 else 'center').grid(row=0,column=col,pady=2)
         self.score_labels = {}
         for row,name in enumerate(DEFAULT_SCORES,1):
-            self.label(table,name,10,FG,bold=name=='Astra',mono=True,anchor='w').grid(row=row,column=0,sticky='w',pady=2)
+            self.label(table,name,10,FG,bold='Astra' in name,mono=True,anchor='w').grid(row=row,column=0,sticky='w',pady=2)
             for col in range(6):
                 label = self.label(table,'—',10,MUTED,mono=True)
                 label.grid(row=row,column=col+1)
@@ -399,7 +395,7 @@ class UsagePanel:
                         old=self.result.get(key,{})
                         if key == 'codex':
                             new['daily_usage'] = retain_daily_usage(old.get('daily_usage'),
-                                new.get('daily_usage'), provider_ok=new.get('ok', False))
+                                new.get('daily_usage'))
                         field={'codex':'cards','deepseek':'balances','radar':'tables'}.get(key)
                         if not new.get('ok') and field and old.get(field):
                             new={**old,**new,field:old[field]}
@@ -456,14 +452,15 @@ class UsagePanel:
         self.token_labels[kind] = self.label(row, '', 10, mono=True)
         self.token_labels[kind].pack(side='left')
         self.button(row, '明细', self.usage_details).pack(side='right')
+        if kind == 'codex':
+            self.local_token_labels[kind] = self.label(self.body, '', 8, MUTED)
+            self.local_token_labels[kind].pack(anchor='w')
         self.update_token_labels()
 
     def update_token_labels(self):
         fresh = self.tokens.get('date') == dt.datetime.now().date().isoformat()
         for kind, label in self.token_labels.items():
             data = self.tokens.get(kind, {})
-            # Official daily buckets can lag or remain cached. Keep this live
-            # local counter visible regardless of whether a bucket exists.
             if not fresh or not data:
                 text = '本机今日 — · 正在读取本机记录'
             elif not data.get('available'):
@@ -472,6 +469,17 @@ class UsagePanel:
                 text = f'本机今日 {token_text(data["total"])} · 缓存命中 — · 不完整'
             else:
                 text = f'本机今日 {token_text(data["total"])} · 本机缓存命中 {cache_hit_text(data)}'
+            if kind == 'codex':
+                local_label = getattr(self, 'local_token_labels', {}).get(kind)
+                if local_label is not None:
+                    local_label.configure(text=text + ' · 仅本机')
+                daily = self.result.get('codex', {}).get('daily_usage') or {}
+                official = latest_official_usage(daily)
+                if official:
+                    text = f'官方 {official["date"]}  {token_text(official["total"])}'
+                    text += ' · 已报' if official['ok'] else ' · 旧数据'
+                else:
+                    text = '官方日用量 — · 暂未提供'
             label.configure(text=text)
         self.update_refresh_status()
 
@@ -481,8 +489,9 @@ class UsagePanel:
         def stamp(value):
             return dt.datetime.fromtimestamp(value).strftime('%H:%M:%S') if value else '等待读取'
         quota = stamp(self.result.get('codex', {}).get('updated'))
+        official = stamp((self.result.get('codex', {}).get('daily_usage') or {}).get('updated'))
         local = stamp(self.tokens.get('updated'))
-        self.updated_label.configure(text=f'额度读取 {quota} · 本机读取 {local}（10 秒）')
+        self.updated_label.configure(text=f'额度 {quota} · 官方日统计 {official} · 本机 {local}')
 
     def codex_rows(self):
         return codex_daily_rows(self.result.get('codex', {}).get('daily_usage'), self.tokens,
@@ -524,6 +533,11 @@ class UsagePanel:
             except Exception:
                 snapshot = {'available': False, 'partial': True, 'events': [], 'sessions': {}, 'updated': time.time()}
                 report = {}
+                # Legacy counters do not cover modern response records. Never
+                # present their zero/partial fallback as a complete local scan.
+                result['codex'] = {'available': False, 'partial': True, 'ok': False}
+                if result.get('history'):
+                    result['history'][-1]['codex'] = dict(result['codex'])
             messages.put(('tokens', result))
             messages.put(('analytics', (anchor, snapshot, report)))
         threading.Thread(target=worker, daemon=True).start()
@@ -565,10 +579,11 @@ class UsagePanel:
         def update():
             account = self.result.get('codex', {})
             daily = account.get('daily_usage') or {}
-            latest = max(daily.get('buckets') or [], key=lambda b: b['date'], default=None)
+            latest = latest_official_usage(daily)
             lines = ['Codex · 官方账户统计']
             if latest:
-                lines += [f'最近已报 {latest["date"]} · {token_text(latest["total"])}'+('（旧数据）' if not daily.get('ok') else '')]
+                lines += [f'最近已报 {latest["date"]} · {token_text(latest["total"])}'+('（旧数据）' if not daily.get('ok') else ''),
+                          f'精确总量 {latest["total"]:,} tokens']
             else:
                 lines += ['官方日统计暂未提供。']
             if self.codex_rows()[-1]['source'] != 'official':
@@ -591,7 +606,7 @@ class UsagePanel:
             lines += [f'到期 {dt.datetime.fromtimestamp(stamp):%Y-%m-%d %H:%M}' for stamp in credits.get('expires', [])]
             lines += ['', 'm = 百万 token；卡片仅展示，到期明细可能不完整。',
                       '官方日统计每 5 分钟读取，日期与数值沿用官方，可能有延迟。',
-                      '面板本机今日与明细每 10 秒更新，不受官方统计延迟影响。',
+                      '主面板优先显示官方已报日期与总量；本机明细每 10 秒更新。',
                       '本机计数仅含本机保留日志，不等同于官方总量，不与官方相加。',
                       '本机缓存命中率 = 缓存命中 ÷ 输入（输入已含缓存）。',
                       '无输入或记录不完整显示 —；token 数量不等同于账单费用。']
@@ -737,11 +752,15 @@ class UsagePanel:
         text=('Codex\n自动使用本机 Codex CLI 的登录读取官方额度。\n\n'
               'DeepSeek API / Claude Code\n使用 Claude Code 已配置的 DeepSeek API 密钥读取余额。\n'
               '只访问 DeepSeek 官方余额接口，不发起模型对话。\n'
-              '本机今日始终显示实时记录；官方已报单独显示，可能延迟。\n'
+              'Codex 主行显示官方已报日期与总量，可能延迟。\n'
+              '本机实时记录与缓存命中率另列，口径不相加。\n'
               '官方每 5 分钟读取，本机 token 与缓存命中率每 10 秒更新。\n\n'
               '数据说明\n进度条显示剩余比例；未返回的窗口不显示。\n'
               '读取失败时保留旧值并标注，过期值不当作新额度。\n'
-              'IQ 来自 Codex Radar，支持综合、软件工程、视觉空间。\n综合分按两项的有效题量加权，并非人的智商。\n\n'
+              'IQ 来自 Codex Radar，支持综合、软件工程、视觉空间。\n'
+              '沿用网站样本门槛、加权和整数显示，并非人的智商。\n'
+              '6.1 Sol / 6 Sol / 6 Luna 达标时可仅用软工分，\n'
+              '视觉未达标不计零；其他模型须有两项成绩。\n\n'
               '关闭窗口会留在系统托盘；右键托盘图标可以退出。')
         self.label(dialog,text,10,justify='left').pack(anchor='w')
         self.button(dialog,'打开 DeepSeek 控制台',lambda:webbrowser.open('https://platform.deepseek.com/')).pack(anchor='w',pady=(12,0))

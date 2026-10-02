@@ -18,6 +18,16 @@ def analytics_partial_today(snapshot, now):
     return False
 
 
+def latest_official_usage(official):
+    """Select the latest reported date without relabelling it as local today."""
+    official = official or {}
+    # The service's calendar timezone is not documented. A bucket date ahead
+    # of the computer's local date is not evidence of a future usage event.
+    buckets = official.get('buckets', [])
+    latest = max(buckets, key=lambda row: row['date'], default=None)
+    return dict(latest, ok=bool(official.get('ok'))) if latest else None
+
+
 def codex_daily_rows(official, local_snapshot, today_iso):
     """Return seven dates, preferring official buckets even when cached.
 

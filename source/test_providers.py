@@ -87,19 +87,62 @@ class UsageTests(unittest.TestCase):
         rpc_class.assert_called_once_with()
         rpc.close.assert_called_once()
 
+    def test_quota_failure_does_not_hide_successful_official_daily_usage(self):
+        for quota in (TimeoutError(), RuntimeError('quota unavailable'), {}, None):
+            with self.subTest(quota=quota), patch.object(providers, 'CodexRPC') as rpc_class:
+                rpc = rpc_class.return_value
+                rpc.call.side_effect = [{}, quota, {'dailyUsageBuckets': [
+                    {'startDate': '2026-09-13', 'tokens': 42}]}]
+                result = providers.codex_usage()
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['cards'], [])
+                self.assertNotIn('updated', result, 'A failed quota read must not advance its timestamp')
+                self.assertNotIn('reset_credits', result, 'A failed quota read must preserve cached credits')
+                self.assertTrue(result['daily_usage']['ok'])
+                self.assertEqual(result['daily_usage']['buckets'], [{'date': '2026-09-13', 'total': 42}])
+                self.assertIsInstance(result['daily_usage']['updated'], float)
+                self.assertEqual([call.args[0] for call in rpc.call.call_args_list],
+                                 ['initialize', 'account/rateLimits/read', 'account/usage/read'])
+                rpc.close.assert_called_once()
+
+    def test_failed_quota_and_daily_reads_stay_independently_unavailable(self):
+        with patch.object(providers, 'CodexRPC') as rpc_class:
+            rpc = rpc_class.return_value
+            rpc.call.side_effect = [{}, TimeoutError(), TimeoutError()]
+            result = providers.codex_usage()
+        self.assertFalse(result['ok'])
+        self.assertFalse(result['daily_usage']['ok'])
+        self.assertEqual(result['daily_usage']['buckets'], [])
+        self.assertNotIn('updated', result)
+        rpc.close.assert_called_once()
+
+    def test_failed_initialization_does_not_send_account_requests(self):
+        with patch.object(providers, 'CodexRPC') as rpc_class:
+            rpc = rpc_class.return_value
+            rpc.call.side_effect = RuntimeError('initialize failed')
+            result = providers.codex_usage()
+        self.assertFalse(result['ok'])
+        self.assertNotIn('daily_usage', result)
+        self.assertEqual([call.args[0] for call in rpc.call.call_args_list], ['initialize'])
+        rpc.close.assert_called_once()
+
     def test_iq_matches_site_task_weighting(self):
-        a={'points':[{'model':'gpt-6-astra','effort':'high','iq':100,'total':120}]}
-        b={'points':[{'model':'gpt-6-astra','effort':'high','iq':140,'valid_tasks':30}]}
+        a={'schema':3,'mode':'equal_latest_3','benchmark_id':'deep-swe',
+           'points':[{'model':'gpt-6-astra','effort':'high','iq':100,'total':120}]}
+        b={'schema':1,'type':'visual_spatial_reasoning_summary','benchmark_id':'pompeii-adjacency',
+           'points':[{'model':'gpt-6-astra','effort':'high','iq':140,'valid_tasks':30}]}
         tables=providers.radar_tables(a,b)
-        self.assertEqual(tables['综合智能']['Astra'][3],108)
-        self.assertEqual(tables['软件工程']['Astra'][3],100)
-        self.assertEqual(tables['视觉空间']['Astra'][3],140)
+        self.assertEqual(tables['综合智能']['GPT-6 Astra'][3],108)
+        self.assertEqual(tables['软件工程']['GPT-6 Astra'][3],100)
+        self.assertEqual(tables['视觉空间']['GPT-6 Astra'][3],140)
 
     def test_iq_requires_both_components(self):
-        a={'points':[{'model':'gpt-6-astra','effort':'ultra','iq':110,'total':30}]}
-        tables=providers.radar_tables(a,{'points':[]})
-        self.assertEqual(tables['综合智能']['Astra'][0],'')
-        self.assertEqual(tables['软件工程']['Astra'][0],110)
+        a={'schema':3,'mode':'equal_latest_3','benchmark_id':'deep-swe',
+           'points':[{'model':'gpt-6-astra','effort':'ultra','iq':110,'total':30}]}
+        b={'schema':1,'type':'visual_spatial_reasoning_summary','benchmark_id':'pompeii-adjacency','points':[]}
+        tables=providers.radar_tables(a,b)
+        self.assertEqual(tables['综合智能']['GPT-6 Astra'][0],'')
+        self.assertEqual(tables['软件工程']['GPT-6 Astra'][0],110)
 
     def test_other_provider_key_never_sent_to_deepseek(self):
         with patch.dict(providers.os.environ,{'DEEPSEEK_API_KEY':''}), patch.object(providers,'read_json',return_value={

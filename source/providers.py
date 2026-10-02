@@ -2,6 +2,7 @@
 import concurrent.futures
 import datetime as dt
 import json
+import math
 import os
 import pathlib
 import queue
@@ -124,25 +125,35 @@ def codex_usage():
         rpc = CodexRPC()
         rpc.call('initialize', {'clientInfo': {'name': 'usage_panel', 'title': 'Usage Panel', 'version': '1.3.2'}})
         rpc.send({'method': 'initialized'})
-        result = rpc.call('account/rateLimits/read')
-        buckets = result.get('rateLimitsByLimitId') or {'codex': result.get('rateLimits')}
+        result = {}
         cards = []
-        for key, bucket in buckets.items():
-            if not bucket or key != 'codex':
-                continue
-            windows = [normalize_window(bucket.get(k)) for k in ('primary', 'secondary')]
-            windows = sorted([w for w in windows if w], key=lambda w: w['label'] != '每周')
-            cards.append({'name': 'Codex' if key == 'codex' else (bucket.get('limitName') or key),
-                'plan': bucket.get('planType') or '', 'windows': windows})
-        if not cards:
-            raise RuntimeError('账户未返回额度数据。')
+        note = '官方账户额度 · 剩余百分比'
+        try:
+            result = rpc.call('account/rateLimits/read')
+            buckets = result.get('rateLimitsByLimitId') or {'codex': result.get('rateLimits')}
+            for key, bucket in buckets.items():
+                if not bucket or key != 'codex':
+                    continue
+                windows = [normalize_window(bucket.get(k)) for k in ('primary', 'secondary')]
+                windows = sorted([w for w in windows if w], key=lambda w: w['label'] != '每周')
+                cards.append({'name': 'Codex', 'plan': bucket.get('planType') or '', 'windows': windows})
+            if not cards:
+                raise RuntimeError('账户未返回额度数据。')
+        except Exception as exc:
+            cards = []
+            note = str(exc) if isinstance(exc, RuntimeError) else '额度读取超时或连接失败，请稍后刷新。'
+        # These account endpoints have independent availability. A quota error
+        # must not prevent the service's authoritative daily totals being read.
         try:
             daily_usage = normalize_daily_usage(rpc.call('account/usage/read'))
         except Exception:
             daily_usage = {'ok': False, 'buckets': [], 'note': '官方每日统计读取失败，请稍后刷新。'}
         daily_usage['updated'] = time.time()
-        return {'ok': True, 'cards': cards, 'reset_credits': normalize_credits(result.get('rateLimitResetCredits')),
-                'daily_usage': daily_usage, 'updated': time.time(), 'note': '官方账户额度 · 剩余百分比'}
+        data = {'ok': bool(cards), 'cards': cards, 'daily_usage': daily_usage, 'note': note}
+        if cards:
+            data['reset_credits'] = normalize_credits(result.get('rateLimitResetCredits'))
+            data['updated'] = time.time()
+        return data
     except Exception as exc:
         return {'ok': False, 'cards': [], 'note': str(exc) if isinstance(exc, RuntimeError) else '读取超时或连接失败，请稍后刷新。'}
     finally:
@@ -198,27 +209,116 @@ def deepseek_usage():
         return {'ok':False,'note':'DeepSeek 暂时无法连接，请稍后刷新。'}
 
 RADAR_LEVELS=['ultra','max','xhigh','high','medium','low']
-RADAR_MODELS={'gpt-6-astra':'Astra','gpt-5.6-sol':'Sol','gpt-5.6-terra':'Terra','gpt-5.6-luna':'Luna'}
+RADAR_MODELS={
+    'gpt-6-astra':'GPT-6 Astra', 'gpt-6.1-sol':'GPT-6.1 Sol',
+    'gpt-6-sol':'GPT-6 Sol', 'gpt-6-luna':'GPT-6 Luna',
+    'gpt-5.6-sol':'GPT-5.6 Sol', 'gpt-5.6-terra':'GPT-5.6 Terra',
+    'gpt-5.6-luna':'GPT-5.6 Luna', 'gpt-5.5':'GPT-5.5',
+}
+# Mirror the homepage's hasReliableGpt6Score, not a generic GPT-6 prefix rule:
+# Astra still needs both dimensions. Verified at https://codexradar.com/ 2026-10-02.
+RADAR_SAMPLE_GATED_MODELS={'gpt-6.1-sol','gpt-6-sol','gpt-6-luna'}
+
+def _radar_number(value):
+    if value is None or isinstance(value,bool):
+        return None
+    try:
+        number=float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError,ValueError,OverflowError):
+        return None
+
+def _radar_visual_summary(payload):
+    """The visual endpoint can return its compact summary or its raw task table."""
+    if not isinstance(payload,dict) or payload.get('schema')!=1 or payload.get('benchmark_id')!='pompeii-adjacency':
+        raise ValueError('Unsupported visual benchmark')
+    if payload.get('type')=='visual_spatial_reasoning_summary':
+        return payload
+    tasks,combos,cells=payload.get('tasks'),payload.get('combos'),payload.get('cells')
+    if (payload.get('scoring_mode')!='continuous-macro' or not isinstance(tasks,list) or not tasks
+            or not isinstance(combos,list) or not combos or not isinstance(cells,dict)):
+        raise ValueError('Unsupported visual table')
+    points=[]
+    latest=None
+    for combo in combos:
+        if not isinstance(combo,dict):
+            continue
+        model,effort=combo.get('model'),combo.get('effort')
+        if not isinstance(model,str) or model not in RADAR_MODELS or effort not in RADAR_LEVELS:
+            continue
+        scores=[]
+        for task in tasks:
+            if not isinstance(task,dict) or task.get('id') is None:
+                continue
+            cell=cells.get(f'{task["id"]}|{model}|{effort}')
+            runners=cell.get('ran_by') if isinstance(cell,dict) else None
+            if not isinstance(runners,list) or not runners or not isinstance(runners[0],dict):
+                continue
+            # The website uses the latest runner only, not every historical run.
+            runner=runners[0]
+            score=_radar_number(runner.get('score'))
+            if score is not None:
+                scores.append(max(0,min(1,score)))
+            try:
+                graded=dt.datetime.fromisoformat(runner['graded_at'].replace('Z','+00:00'))
+                if graded.tzinfo is not None and (latest is None or graded>latest):
+                    latest=graded
+            except (KeyError,TypeError,ValueError,AttributeError):
+                pass
+        if scores:
+            points.append({'model':model,'effort':effort,'iq':sum(scores)/len(scores)*150,
+                           'valid_tasks':len(scores)})
+    return {'schema':1,'type':'visual_spatial_reasoning_summary','benchmark_id':'pompeii-adjacency',
+            'points':points,'source_updated_at':latest.isoformat() if latest else None}
+
+def _radar_points(payload,software=False):
+    if software:
+        if not isinstance(payload,dict) or payload.get('benchmark_id')!='deep-swe':
+            raise ValueError('Unsupported software benchmark')
+        if payload.get('schema')==3 and payload.get('mode')=='equal_latest_3':
+            sample_field='total'
+        elif payload.get('schema')==2 and payload.get('mode')=='weighted_latest_3':
+            sample_field='weighted_total'
+        else:
+            raise ValueError('Unsupported software scoring mode')
+    else:
+        payload=_radar_visual_summary(payload)
+        sample_field='valid_tasks'
+    if not isinstance(payload.get('points'),list):
+        raise ValueError('Missing radar points')
+    points={}
+    for point in payload['points']:
+        if not isinstance(point,dict):
+            continue
+        model,effort=point.get('model'),point.get('effort')
+        if not isinstance(model,str) or model not in RADAR_MODELS or effort not in RADAR_LEVELS:
+            continue
+        iq=_radar_number(point.get('iq'))
+        samples=_radar_number(point.get(sample_field))
+        if iq is None or not 0<=iq<=150 or (software and (samples is None or samples<=0)):
+            continue
+        samples=max(0,samples or 0)
+        if model in RADAR_SAMPLE_GATED_MODELS and samples<30:
+            continue
+        points[model,effort]={'iq':iq,'samples':samples}
+    return points
 
 def radar_tables(software,visual):
-    def points(payload):
-        return {(p.get('model'),p.get('effort')):p for p in payload.get('points',[])
-            if p.get('model') in RADAR_MODELS and p.get('effort') in RADAR_LEVELS
-            and isinstance(p.get('iq'),(int,float)) and 0<=p['iq']<=150}
-    a,b=points(software),points(visual)
+    a,b=_radar_points(software,True),_radar_points(visual)
     tables={mode:{name:['']*6 for name in RADAR_MODELS.values()} for mode in ['综合智能','软件工程','视觉空间']}
     for key in a.keys()|b.keys():
         model,effort=key
         name=RADAR_MODELS[model]
         index=RADAR_LEVELS.index(effort)
-        if key in a: tables['软件工程'][name][index]=round(a[key]['iq'],1)
-        if key in b: tables['视觉空间'][name][index]=round(b[key]['iq'],1)
+        # The site renders Math.round(iq): positive half ties round up, not to even.
+        if key in a: tables['软件工程'][name][index]=math.floor(a[key]['iq']+.5)
+        if key in b: tables['视觉空间'][name][index]=math.floor(b[key]['iq']+.5)
         if key in a and key in b:
             x,y=a[key],b[key]
-            nx=x.get('valid_tasks',x.get('total',0)) or 0
-            ny=y.get('valid_tasks',y.get('total',0)) or 0
-            if nx>0 and ny>0:
-                tables['综合智能'][name][index]=round((x['iq']*nx+y['iq']*ny)/(nx+ny),1)
+            nx,ny=max(1,x['samples']),max(1,y['samples'])
+            tables['综合智能'][name][index]=math.floor((x['iq']*nx+y['iq']*ny)/(nx+ny)+.5)
+        elif key in a and model in RADAR_SAMPLE_GATED_MODELS:
+            tables['综合智能'][name][index]=math.floor(a[key]['iq']+.5)
     return tables
 
 def radar_scores():
@@ -226,17 +326,21 @@ def radar_scores():
         def fetch(path):
             request=urllib.request.Request('https://codexradar.com'+path,headers={'User-Agent':'UsagePanel/1.0','Accept':'application/json'})
             with urllib.request.urlopen(request,timeout=18) as r:
+                status=r.headers.get('X-Codex-Cache','')
+                if not status or status.startswith('STALE') or status=='ERROR':
+                    raise ValueError('Radar cache is not current')
                 return json.load(r)
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             first=pool.submit(fetch,'/api/intelligence-efficiency-metrics')
             second=pool.submit(fetch,'/api/visual-spatial-reasoning')
             software,visual=first.result(),second.result()
+        visual=_radar_visual_summary(visual)
         tables=radar_tables(software,visual)
         if not any(v!='' for row in tables['软件工程'].values() for v in row):
             raise ValueError('No valid radar results')
         return {'ok':True,'tables':tables,'updated':time.time(),
             'software_updated':software.get('source_updated_at'),'visual_updated':visual.get('source_updated_at'),
-            'note':'Codex Radar 社区评测 · 综合分按有效题量加权'}
+            'note':'Codex Radar 社区评测 · 沿用网站样本门槛、加权与整数显示'}
     except Exception:
         return {'ok':False,'note':'Codex Radar 暂时不可用，请稍后刷新。'}
 

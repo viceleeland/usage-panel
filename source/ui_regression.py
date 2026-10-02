@@ -21,6 +21,7 @@ def local_tokens_remain_live_with_official_totals():
     panel.root = app.tk.Tk()
     panel.root.withdraw()
     panel.token_labels = {'codex': app.tk.Label(panel.root)}
+    panel.local_token_labels = {'codex': app.tk.Label(panel.root)}
     panel.updated_label = app.tk.Label(panel.root)
     today = dt.datetime.now().date()
     official_total = 11322000
@@ -34,36 +35,47 @@ def local_tokens_remain_live_with_official_totals():
     def visible(data, date=None):
         panel.tokens = {'date': (date or today).isoformat(), 'codex': data}
         panel.update_token_labels()
-        return panel.token_labels['codex'].cget('text')
+        return (panel.token_labels['codex'].cget('text'),
+                panel.local_token_labels['codex'].cget('text'))
 
     try:
         for official_ok in (True, False):
             panel.result = {'codex': {'daily_usage': {
                 'ok': official_ok, 'buckets': [
                     {'date': today.isoformat(), 'total': official_total}]}}}
-            first = visible(local())
-            second = visible(local(total=18000000))
+            official_first, first = visible(local())
+            official_second, second = visible(local(total=18000000))
             assert '本机今日 12.000m' in first, (
                 f'Official data hid the live local total: {first!r}')
             assert '本机今日 18.000m' in second, (
                 f'Local total did not increase with new records: {second!r}')
             assert first != second
             assert '11.322m' not in first + second
+            assert official_first == official_second
+            assert f'官方 {today.isoformat()}  11.322m' in official_first, official_first
+            assert ('旧数据' in official_first) == (not official_ok), official_first
             assert '本机缓存命中 96.9%' in second
             assert panel.codex_rows()[-1]['total'] == official_total, (
                 'Displaying live local tokens changed the official trend total')
 
-        yesterday = visible(local(), today-dt.timedelta(days=1))
+        official, yesterday = visible(local(), today-dt.timedelta(days=1))
         assert '—' in yesterday and '正在读取' in yesterday, yesterday
         assert '12.000m' not in yesterday and '11.322m' not in yesterday
-        missing = visible({'available': False})
+        assert '11.322m' in official, official
+        official, missing = visible({'available': False})
         assert '—' in missing and '未找到本机记录' in missing, missing
         assert '0.000m' not in missing and '11.322m' not in missing
-        partial = visible(local(total=3000000, partial=True, ok=False))
+        assert '11.322m' in official, official
+        _, partial = visible(local(total=3000000, partial=True, ok=False))
         assert '本机今日 3.000m' in partial and '不完整' in partial, partial
         assert '缓存命中 —' in partial, partial
-        zero = visible(local(total=0, input=0, cached=0, output=0))
+        _, zero = visible(local(total=0, input=0, cached=0, output=0))
         assert '本机今日 0.000m' in zero and '缓存命中 —' in zero, zero
+        panel.result['codex']['daily_usage'] = {'ok': True, 'updated': 150,
+            'buckets': [{'date': today.isoformat(), 'total': 0}]}
+        official, local_text = visible(local())
+        assert '0.000m' in official and '12.000m' not in official, official
+        assert '12.000m' in local_text, local_text
         panel.result['codex']['updated'] = 100
         panel.result['radar'] = {'updated': 9999}
         panel.tokens['updated'] = 200
@@ -74,13 +86,15 @@ def local_tokens_remain_live_with_official_totals():
         second_stamp = panel.updated_label.cget('text')
         assert first_stamp != second_stamp, 'Local read time did not advance'
         quota_stamp = dt.datetime.fromtimestamp(100).strftime('%H:%M:%S')
-        assert f'额度读取 {quota_stamp}' in second_stamp, second_stamp
+        assert f'额度 {quota_stamp}' in second_stamp, second_stamp
+        official_stamp = dt.datetime.fromtimestamp(150).strftime('%H:%M:%S')
+        assert f'官方日统计 {official_stamp}' in second_stamp, second_stamp
         local_stamp = dt.datetime.fromtimestamp(210).strftime('%H:%M:%S')
-        assert f'本机读取 {local_stamp}' in second_stamp, second_stamp
+        assert f'本机 {local_stamp}' in second_stamp, second_stamp
     finally:
         panel.root.destroy()
-    print('PASS: healthy/stale official totals never mask local token growth; '
-          'midnight, missing, partial and zero local states stay explicit')
+    print('PASS: official totals lead, independent local totals remain live; '
+          'stale, midnight, missing, partial and zero states stay explicit')
 
 
 def shutdown_with_pending_workers():

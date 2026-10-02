@@ -2,7 +2,7 @@ import copy
 import datetime as dt
 import unittest
 
-from usage_view import analytics_partial_today, codex_daily_rows, retain_daily_usage
+from usage_view import analytics_partial_today, codex_daily_rows, latest_official_usage, retain_daily_usage
 
 
 class TodayPartialTests(unittest.TestCase):
@@ -30,6 +30,30 @@ class TodayPartialTests(unittest.TestCase):
         self.assertTrue(analytics_partial_today({'partial': True}, self.now))
         self.assertFalse(analytics_partial_today({'partial': False}, self.now))
         self.assertFalse(analytics_partial_today({'partial': True, 'issues': []}, self.now))
+
+
+class LatestOfficialUsageTests(unittest.TestCase):
+    def test_latest_reported_date_is_preserved_without_local_calendar_filter(self):
+        official = {'ok': True, 'buckets': [
+            {'date': '2026-10-03', 'total': 999},
+            {'date': '2026-09-30', 'total': 10},
+            {'date': '2026-10-01', 'total': 20}]}
+        previous = copy.deepcopy(official)
+        self.assertEqual(latest_official_usage(official),
+                         {'date': '2026-10-03', 'total': 999, 'ok': True})
+        self.assertEqual(official, previous)
+
+    def test_zero_and_stale_values_remain_official(self):
+        for ok in (True, False):
+            with self.subTest(ok=ok):
+                official = {'ok': ok, 'buckets': [{'date': '2026-10-02', 'total': 0}]}
+                self.assertEqual(latest_official_usage(official),
+                                 {'date': '2026-10-02', 'total': 0, 'ok': ok})
+
+    def test_missing_buckets_remain_unknown(self):
+        for official in (None, {}, {'ok': True, 'buckets': []}):
+            with self.subTest(official=official):
+                self.assertIsNone(latest_official_usage(official))
 
 
 class DailyRowsTests(unittest.TestCase):

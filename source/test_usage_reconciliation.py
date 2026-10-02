@@ -1,3 +1,4 @@
+import copy
 import datetime as dt
 import json
 import unittest
@@ -91,6 +92,66 @@ class ReconciliationTests(unittest.TestCase):
         self.assertTrue(report['target']['utc_partial'])
         self.assertEqual(report['reason_counts']['snapshot_issue'], 1)
         self.assertNotIn('PRIVATE PATH', json.dumps(report))
+
+    def test_issue_types_are_allowlisted_and_attribution_does_not_remove_tokens(self):
+        cases = [
+            ('部分用量记录时间无效，无法确定归属周期。', 'invalid_usage_timestamp'),
+            ('部分单次用量记录的计数或标识无效。', 'invalid_response_counts_or_id'),
+            ('部分累计用量记录的计数无效。', 'invalid_cumulative_counts'),
+            ('部分旧日志缺少可辨识的单次用量。', 'missing_legacy_last_usage'),
+            ('部分旧日志缺少起始累计基线，仅计入可辨识的后续用量。', 'missing_legacy_baseline'),
+            ('部分日志目录无法读取，无法确定缺失用量的周期。', 'unreadable_log_directory'),
+            ('部分日志文件无法读取，无法确定缺失用量的周期。', 'unreadable_log_file'),
+            ('部分日志记录无法解析，无法确定归属周期。', 'unparseable_log_record'),
+            ('部分 Agent 关系存在循环，任务归属未知。', 'agent_attribution_cycle'),
+        ]
+        item = event('2026-10-01T12:00:00+08:00')
+        issues = [{'timestamp': item['timestamp'], 'reason': reason} for reason, _ in cases]
+        report = self.build([item], issues=issues, partial=True)
+        expected = {code: 1 for _, code in cases}
+        breakdown = report['issue_breakdown']
+        self.assertEqual(breakdown['totals'], expected)
+        self.assertEqual(breakdown['attribution_only_types'], ['agent_attribution_cycle'])
+        self.assertEqual(breakdown['count_semantics'], 'snapshot_issue_entries_not_missing_tokens')
+        for basis in ('local', 'utc'):
+            self.assertEqual(breakdown[basis]['daily'][-1]['counts'], expected)
+            self.assertEqual(breakdown[basis]['undated'], {})
+            self.assertEqual(breakdown[basis]['outside_range'], {})
+            self.assertEqual(report['target'][basis+'_total'], 100)
+            self.assertTrue(report['target'][basis+'_partial'])
+
+    def test_issue_dates_have_separate_local_utc_undated_and_outside_counts(self):
+        reason = '部分单次用量记录的计数或标识无效。'
+        issues = [
+            {'timestamp': event('2026-10-02T01:00:00+08:00')['timestamp'], 'reason': reason},
+            {'timestamp': event('2026-09-24T12:00:00+08:00')['timestamp'], 'reason': reason},
+            {'timestamp': None, 'reason': reason},
+            {'timestamp': float('inf'), 'reason': 'PRIVATE_REASON'},
+            {'timestamp': True, 'reason': ['PRIVATE_PATH']},
+            None,
+        ]
+        breakdown = self.build(issues=issues)['issue_breakdown']
+        code = 'invalid_response_counts_or_id'
+        self.assertEqual(breakdown['totals'], {code: 3, 'unknown_issue_type': 3})
+        self.assertEqual(breakdown['local']['outside_range'], {code: 2})
+        self.assertEqual(breakdown['utc']['outside_range'], {code: 1})
+        self.assertEqual(breakdown['local']['daily'][-1]['counts'], {})
+        self.assertEqual(breakdown['utc']['daily'][-1]['counts'], {code: 1})
+        for basis in ('local', 'utc'):
+            self.assertEqual(breakdown[basis]['undated'], {code: 1, 'unknown_issue_type': 3})
+        self.assertNotIn('PRIVATE_', json.dumps(breakdown, allow_nan=False))
+
+    def test_issue_export_preserves_input_and_never_exports_extra_metadata(self):
+        snapshot = {'available': True, 'partial': False, 'events': [], 'issues': [
+            {'timestamp': NOW.timestamp()-86400, 'reason': 'PRIVATE_REASON',
+             'path': 'PRIVATE_PATH', 'session_id': 'PRIVATE_ID', 'content': 'PRIVATE_TEXT'}]}
+        original = copy.deepcopy(snapshot)
+        with patch.object(reconcile, '_local_date',
+                          side_effect=lambda stamp: dt.datetime.fromtimestamp(stamp, LOCAL).date()):
+            report = reconcile.build_reconciliation(snapshot, {}, NOW)
+        self.assertEqual(snapshot, original)
+        self.assertNotIn('PRIVATE_', json.dumps(report, allow_nan=False))
+        self.assertEqual(report['issue_breakdown']['totals'], {'unknown_issue_type': 1})
 
     def test_local_yesterday_can_still_be_an_open_utc_day(self):
         now = NOW.replace(hour=2)

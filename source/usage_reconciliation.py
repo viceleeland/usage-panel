@@ -12,6 +12,20 @@ from usage_view import official_range_rows
 
 MAX_DAYS = 7
 
+# Match only collector-owned messages. Never serialize an arbitrary reason:
+# it may contain a path, identifier, or other private diagnostic information.
+_ISSUE_TYPES = {
+    '部分用量记录时间无效，无法确定归属周期。': 'invalid_usage_timestamp',
+    '部分单次用量记录的计数或标识无效。': 'invalid_response_counts_or_id',
+    '部分累计用量记录的计数无效。': 'invalid_cumulative_counts',
+    '部分旧日志缺少可辨识的单次用量。': 'missing_legacy_last_usage',
+    '部分旧日志缺少起始累计基线，仅计入可辨识的后续用量。': 'missing_legacy_baseline',
+    '部分日志目录无法读取，无法确定缺失用量的周期。': 'unreadable_log_directory',
+    '部分日志文件无法读取，无法确定缺失用量的周期。': 'unreadable_log_file',
+    '部分日志记录无法解析，无法确定归属周期。': 'unparseable_log_record',
+    '部分 Agent 关系存在循环，任务归属未知。': 'agent_attribution_cycle',
+}
+
 
 def _timestamp(value):
     if (isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -31,6 +45,42 @@ def _utc_date(stamp):
 
 def _count(value):
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _issue_breakdown(issues, dates):
+    """Count existing issue entries, without estimating missing tokens."""
+    result = {'count_semantics': 'snapshot_issue_entries_not_missing_tokens',
+              'attribution_only_types': ['agent_attribution_cycle'], 'totals': {}}
+    daily = {basis: {day: {} for day in dates} for basis in ('local', 'utc')}
+    for basis in daily:
+        result[basis] = {'undated': {}, 'outside_range': {}}
+
+    def add(counts, code):
+        counts[code] = counts.get(code, 0)+1
+
+    for issue in issues if isinstance(issues, list) else []:
+        issue = issue if isinstance(issue, dict) else {}
+        reason = issue.get('reason')
+        code = (_ISSUE_TYPES.get(reason, 'unknown_issue_type')
+                if isinstance(reason, str) else 'unknown_issue_type')
+        add(result['totals'], code)
+        stamp = _timestamp(issue.get('timestamp'))
+        for basis, date_for in (('local', _local_date), ('utc', _utc_date)):
+            try:
+                day = date_for(stamp) if stamp is not None else None
+            except (OverflowError, OSError, ValueError):
+                day = None
+            if day is None:
+                counts = result[basis]['undated']
+            elif day in daily[basis]:
+                counts = daily[basis][day]
+            else:
+                counts = result[basis]['outside_range']
+            add(counts, code)
+    for basis in daily:
+        result[basis]['daily'] = [{'date': day.isoformat(), 'counts': daily[basis][day]}
+                                  for day in dates]
+    return result
 
 
 def build_reconciliation(snapshot, official, now=None, start_date=None):
@@ -172,4 +222,4 @@ def build_reconciliation(snapshot, official, now=None, start_date=None):
                 'snapshot_updated_at': _timestamp(snapshot.get('updated')),
                 'official_updated_at': _timestamp(official.get('updated'))},
             'snapshot_available': available, 'daily': daily, 'target': target,
-            'reason_counts': reasons}
+            'reason_counts': reasons, 'issue_breakdown': _issue_breakdown(issues, dates)}
